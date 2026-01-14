@@ -49,6 +49,14 @@ jobs:
         run: |
           rsync -a app/ linkweb_build/
 
+      - name: Debug - Check file structure
+        run: |
+          echo "📂 Checking Android build files:"
+          find linkweb_build/android -name "build.gradle*" -type f
+          echo ""
+          echo "📂 App directory structure:"
+          ls -la linkweb_build/android/app/ || true
+
       - name: Force Android minSdk = 24
         run: |
           set -euo pipefail
@@ -56,11 +64,13 @@ jobs:
           KTS="linkweb_build/android/app/build.gradle.kts"
 
           if [ -f "$GROOVY" ]; then
+            echo "✅ Found build.gradle"
             sed -i -E 's/minSdkVersion[[:space:]]+[^[:space:]]+/minSdkVersion 24/' "$GROOVY"
           elif [ -f "$KTS" ]; then
+            echo "✅ Found build.gradle.kts"
             sed -i -E 's/minSdk[[:space:]]*=[[:space:]]*[^[:space:]]+/minSdk = 24/' "$KTS"
           else
-            echo "❌ Gradle file not found"
+            echo "❌ No Gradle file found, checking all locations:"
             find linkweb_build/android -maxdepth 5 -type f -name "build.gradle*"
             exit 1
           fi
@@ -74,29 +84,29 @@ jobs:
 
       - name: Set Application Name (支持中文)
         run: |
-          APP_NAME="${{ github.event.inputs.app_name }}"
-          MANIFEST="linkweb_build/android/app/src/main/AndroidManifest.xml"
-          
           python3 << 'PYTHON_SCRIPT'
           import re
-          import sys
           
           app_name = '''${{ github.event.inputs.app_name }}'''
           manifest_path = 'linkweb_build/android/app/src/main/AndroidManifest.xml'
           
-          with open(manifest_path, 'r', encoding='utf-8') as f:
-              content = f.read()
-          
-          content = re.sub(
-              r'android:label="[^"]*"',
-              f'android:label="{app_name}"',
-              content
-          )
-          
-          with open(manifest_path, 'w', encoding='utf-8') as f:
-              f.write(content)
-          
-          print(f"✅ App name set to: {app_name}")
+          try:
+              with open(manifest_path, 'r', encoding='utf-8') as f:
+                  content = f.read()
+              
+              content = re.sub(
+                  r'android:label="[^"]*"',
+                  f'android:label="{app_name}"',
+                  content
+              )
+              
+              with open(manifest_path, 'w', encoding='utf-8') as f:
+                  f.write(content)
+              
+              print(f"✅ App name set to: {app_name}")
+          except Exception as e:
+              print(f"❌ Error: {e}")
+              exit(1)
           PYTHON_SCRIPT
 
       - name: Verify Manifest
@@ -118,10 +128,12 @@ jobs:
           
           if [ ! -f "$KEYSTORE_PATH" ] || [ ! -s "$KEYSTORE_PATH" ]; then
             echo "❌ Keystore file is empty or invalid"
+            ls -lh keystore.jks || true
             exit 1
           fi
           
-          echo "✅ Keystore size: $(stat -c%s "$KEYSTORE_PATH" 2>/dev/null || stat -f%z "$KEYSTORE_PATH") bytes"
+          KEYSTORE_SIZE=$(stat -c%s "$KEYSTORE_PATH" 2>/dev/null || stat -f%z "$KEYSTORE_PATH" 2>/dev/null || echo "unknown")
+          echo "✅ Keystore size: ${KEYSTORE_SIZE} bytes"
           
           cat > linkweb_build/android/key.properties << EOF
           storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -136,26 +148,60 @@ jobs:
       - name: Configure Gradle for signing
         run: |
           set -euo pipefail
-          GROOVY="linkweb_build/android/app/build.gradle"
           
-          if [ ! -f "$GROOVY" ]; then
-            echo "❌ build.gradle not found"
+          # 查找 build.gradle 文件
+          GROOVY="linkweb_build/android/app/build.gradle"
+          KTS="linkweb_build/android/app/build.gradle.kts"
+          
+          if [ -f "$GROOVY" ]; then
+            BUILD_FILE="$GROOVY"
+            echo "✅ Using build.gradle"
+          elif [ -f "$KTS" ]; then
+            BUILD_FILE="$KTS"
+            echo "✅ Using build.gradle.kts"
+          else
+            echo "❌ No build.gradle file found!"
+            echo "Searching for gradle files..."
+            find linkweb_build/android -name "build.gradle*" -type f
             exit 1
           fi
           
-          if grep -q "signingConfigs" "$GROOVY"; then
-            echo "⚠️  Signing config already exists"
-          else
-            cat > /tmp/keystore_load.gradle << 'EOF'
+          # 检查是否已配置签名
+          if grep -q "signingConfigs" "$BUILD_FILE"; then
+            echo "⚠️  Signing config already exists, skipping..."
+            exit 0
+          fi
+          
+          # 为 build.gradle 添加签名配置
+          if [ -f "$GROOVY" ]; then
+            # 创建备份
+            cp "$GROOVY" "${GROOVY}.backup"
+            
+            # 在文件开头添加 keystore 属性加载代码
+            cat > /tmp/prepend.txt << 'GRADLE_HEADER'
           def keystoreProperties = new Properties()
           def keystorePropertiesFile = rootProject.file("key.properties")
           if (keystorePropertiesFile.exists()) {
               keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
           }
           
-          EOF
+          GRADLE_HEADER
             
-            cat > /tmp/signing_configs.gradle << 'EOF'
+            # 合并文件
+            cat /tmp/prepend.txt "$GROOVY" > /tmp/build.gradle.new
+            mv /tmp/build.gradle.new "$GROOVY"
+            
+            # 在 android { 后添加 signingConfigs
+            python3 << 'PYTHON_SCRIPT'
+          import re
+          
+          gradle_file = 'linkweb_build/android/app/build.gradle'
+          
+          with open(gradle_file, 'r') as f:
+              content = f.read()
+          
+          # 在 android { 块内添加 signingConfigs
+          signing_config = '''
               signingConfigs {
                   release {
                       keyAlias keystoreProperties['keyAlias']
@@ -164,21 +210,32 @@ jobs:
                       storePassword keystoreProperties['storePassword']
                   }
               }
-          EOF
+          '''
+          
+          # 在 buildTypes 之前插入 signingConfigs
+          content = re.sub(
+              r'(\s+buildTypes\s*\{)',
+              signing_config + r'\1',
+              content
+          )
+          
+          # 在 release buildType 中添加 signingConfig
+          content = re.sub(
+              r'(release\s*\{)',
+              r'\1\n            signingConfig signingConfigs.release',
+              content
+          )
+          
+          with open(gradle_file, 'w') as f:
+              f.write(content)
+          
+          print("✅ Gradle signing configuration added")
+          PYTHON_SCRIPT
             
-            awk '/^android \{/ {print; system("cat /tmp/keystore_load.gradle"); next} 1' "$GROOVY" > /tmp/build.gradle.tmp
-            mv /tmp/build.gradle.tmp "$GROOVY"
-            
-            awk '/buildTypes \{/ {system("cat /tmp/signing_configs.gradle"); print; next} 1' "$GROOVY" > /tmp/build.gradle.tmp
-            mv /tmp/build.gradle.tmp "$GROOVY"
-            
-            sed -i '/release {/a\            signingConfig signingConfigs.release' "$GROOVY"
-            
-            echo "✅ Gradle signing configuration added"
           fi
           
           echo "📄 Checking signing config:"
-          grep -A 8 "signingConfigs" "$GROOVY" || echo "⚠️  No signingConfigs found"
+          grep -A 8 "signingConfigs" "$BUILD_FILE" || echo "⚠️  Could not verify signingConfigs"
 
       - name: Get dependencies
         working-directory: linkweb_build
@@ -199,7 +256,7 @@ jobs:
           for apk in linkweb_build/build/app/outputs/flutter-apk/app-*-release.apk; do
             if [ -f "$apk" ]; then
               echo "Checking: $(basename "$apk")"
-              jarsigner -verify -verbose -certs "$apk" | head -20 || true
+              jarsigner -verify -verbose -certs "$apk" 2>&1 | head -20 || true
               echo "---"
             fi
           done
@@ -211,7 +268,11 @@ jobs:
           
           VERSION="${{ github.event.inputs.version_name }}"
           APP_NAME="${{ github.event.inputs.app_name }}"
-          SAFE_APP_NAME=$(echo "$APP_NAME" | tr -cd '[:alnum:]_-' || echo "LinkWeb")
+          # 移除特殊字符，保留字母数字、下划线和连字符
+          SAFE_APP_NAME=$(echo "$APP_NAME" | sed 's/[^[:alnum:]_-]//g')
+          [ -z "$SAFE_APP_NAME" ] && SAFE_APP_NAME="LinkWeb"
+          
+          echo "📦 Collecting APKs with name: ${SAFE_APP_NAME}"
           
           for apk in linkweb_build/build/app/outputs/flutter-apk/app-*-release.apk; do
             if [ ! -f "$apk" ]; then
