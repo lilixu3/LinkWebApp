@@ -96,15 +96,19 @@ jobs:
       - name: Install Android SDK command line tools (for apksigner)
         run: |
           sudo apt update
-          sudo apt install -y wget unzip
+          sudo apt install -y wget unzip openjdk-11-jdk
           wget https://dl.google.com/android/repository/commandlinetools-linux-7583922_latest.zip
           unzip commandlinetools-linux-7583922_latest.zip -d $HOME/Android
           mkdir -p $HOME/Android/Sdk/cmdline-tools
           mv $HOME/Android/cmdline-tools/* $HOME/Android/Sdk/cmdline-tools/
+          
+          # Set environment variables
           export ANDROID_HOME=$HOME/Android/Sdk
           export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/build-tools/30.0.3
-          sdkmanager --update
-          sdkmanager "build-tools;30.0.3"
+          
+          # Install build tools and update SDK manager
+          $HOME/Android/Sdk/cmdline-tools/latest/bin/sdkmanager --update
+          $HOME/Android/Sdk/cmdline-tools/latest/bin/sdkmanager "build-tools;30.0.3"
         env:
           ANDROID_HOME: $HOME/Android/Sdk
 
@@ -114,7 +118,7 @@ jobs:
 
       - name: Sign APK with apksigner
         run: |
-          apksigner sign --ks keystore.jks --ks-key-alias "$ANDROID_KEY_ALIAS" --ks-pass pass:"$ANDROID_KEYSTORE_PASSWORD" --key-pass pass:"$ANDROID_KEY_PASSWORD" --out linkweb_build/build/app/outputs/flutter-apk/app-release-signed.apk linkweb_build/build/app/outputs/flutter-apk/app-release.apk
+          $HOME/Android/Sdk/cmdline-tools/latest/bin/apksigner sign --ks keystore.jks --ks-key-alias "$ANDROID_KEY_ALIAS" --ks-pass pass:"$ANDROID_KEYSTORE_PASSWORD" --key-pass pass:"$ANDROID_KEY_PASSWORD" --out linkweb_build/build/app/outputs/flutter-apk/app-release-signed.apk linkweb_build/build/app/outputs/flutter-apk/app-release.apk
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
