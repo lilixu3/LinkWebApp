@@ -93,13 +93,16 @@ jobs:
         working-directory: linkweb_build
         run: flutter pub get
 
-      - name: Install Android SDK and Build Tools (for apksigner)
+      - name: Install Android SDK command line tools (for apksigner)
         run: |
           sudo apt update
-          sudo apt install -y openjdk-11-jdk
-          mkdir -p $HOME/Android/Sdk
+          sudo apt install -y wget unzip
+          wget https://dl.google.com/android/repository/commandlinetools-linux-7583922_latest.zip
+          unzip commandlinetools-linux-7583922_latest.zip -d $HOME/Android
+          mkdir -p $HOME/Android/Sdk/cmdline-tools
+          mv $HOME/Android/cmdline-tools/* $HOME/Android/Sdk/cmdline-tools/
           export ANDROID_HOME=$HOME/Android/Sdk
-          export PATH=$PATH:$ANDROID_HOME/tools:$ANDROID_HOME/tools/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/build-tools/30.0.3
+          export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/build-tools/30.0.3
           sdkmanager --update
           sdkmanager "build-tools;30.0.3"
         env:
