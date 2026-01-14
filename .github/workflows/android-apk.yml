@@ -1,167 +1,218 @@
-name: Build APK
+name: Build Android APK
 
 on:
   workflow_dispatch:
     inputs:
-      version_name:
-        description: "App 版本号（用于 versionName 和 Release tag，比如 0.2.0）"
-        required: true
-        type: string
-
       version_code:
-        description: "versionCode（可选；留空则使用 GITHUB_RUN_NUMBER）"
-        required: false
-        type: string
-
-      release_notes:
-        description: "发行版说明（可选）"
-        required: false
-        type: string
-
-      upload_private_release:
-        description: "上传到【当前仓库】的 GitHub Release（私有仓库用）"
+        description: 'Version code (integer)'
         required: true
-        type: boolean
-        default: false
-
-      upload_public_release:
-        description: "上传到【公共仓库】的 GitHub Release（不给看源码用）"
+        default: '1'
+      version_name:
+        description: 'Version name (e.g., 1.0.0)'
+        required: true
+        default: '1.0.0'
+      app_name:
+        description: 'Application name'
+        required: true
+        default: 'LinkWeb'
+      upload_to_release:
+        description: 'Upload to GitHub Release'
         required: true
         type: boolean
         default: true
-
-      public_release_repo:
-        description: "公共发行仓库（owner/repo），例如 lilixu3/danmu-api-android"
-        required: true
-        type: string
-        default: "lilixu3/danmu-api-android"
-
-permissions:
-  contents: write
-
-env:
-  ANDROID_API: "34"
-  BUILD_TOOLS: "34.0.0"
+      release_notes:
+        description: 'Release notes for GitHub Release'
+        required: false
+        default: 'Automated release build'
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
-      - name: "Checkout repo"
-        uses: "actions/checkout@v4"
+      - name: Checkout
+        uses: actions/checkout@v5
 
-      - name: "Resolve version inputs"
-        shell: bash
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Create Flutter skeleton (Android only)
+        run: |
+          flutter create --platforms=android --org com.linkweb linkweb_build
+
+      - name: Copy sources into skeleton
+        run: |
+          rsync -a app/ linkweb_build/
+
+      - name: Force Android minSdk = 24
         run: |
           set -euo pipefail
-          VN="${{ inputs.version_name }}"
-          VN="${VN#v}"; VN="${VN#V}"
-          echo "APP_VERSION_NAME=$VN" >> "$GITHUB_ENV"
+          GROOVY="linkweb_build/android/app/build.gradle"
+          KTS="linkweb_build/android/app/build.gradle.kts"
 
-          VC="${{ inputs.version_code }}"
-          if [ -n "${VC:-}" ]; then
-            echo "APP_VERSION_CODE=$VC" >> "$GITHUB_ENV"
+          if [ -f "$GROOVY" ]; then
+            sed -i -E 's/minSdkVersion[[:space:]]+[^[:space:]]+/minSdkVersion 24/' "$GROOVY"
+          elif [ -f "$KTS" ]; then
+            sed -i -E 's/minSdk[[:space:]]*=[[:space:]]*[^[:space:]]+/minSdk = 24/' "$KTS"
           else
-            echo "APP_VERSION_CODE=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+            echo "❌ Gradle file not found"
+            find linkweb_build/android -maxdepth 5 -type f -name "build.gradle*"
+            exit 1
           fi
 
-          NOTES="${{ inputs.release_notes }}"
-          if [ -z "${NOTES:-}" ]; then
-            NOTES="Automated build for v$VN"
-          fi
-          {
-            echo "RELEASE_NOTES<<EOF"
-            echo "$NOTES"
-            echo "EOF"
-          } >> "$GITHUB_ENV"
+      - name: Set Version Code and Version Name
+        run: |
+          cat >> linkweb_build/android/local.properties << EOF
+          flutter.versionCode=${{ github.event.inputs.version_code }}
+          flutter.versionName=${{ github.event.inputs.version_name }}
+          EOF
 
-      - name: "Prepare signing keystore (REQUIRED, fixed secrets)"
-        shell: bash
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      - name: Set Application Name
+        run: |
+          sed -i "s/android:label=\".*\"/android:label=\"${{ github.event.inputs.app_name }}\"/" \
+            linkweb_build/android/app/src/main/AndroidManifest.xml
+
+      - name: Prepare Keystore
         run: |
           set -euo pipefail
-          [ -n "${ANDROID_KEYSTORE_BASE64:-}" ] || (echo "❌ Missing ANDROID_KEYSTORE_BASE64" && exit 1)
-          [ -n "${ANDROID_KEYSTORE_PASSWORD:-}" ] || (echo "❌ Missing ANDROID_KEYSTORE_PASSWORD" && exit 1)
-          [ -n "${ANDROID_KEY_ALIAS:-}" ] || (echo "❌ Missing ANDROID_KEY_ALIAS" && exit 1)
-          [ -n "${ANDROID_KEY_PASSWORD:-}" ] || (echo "❌ Missing ANDROID_KEY_PASSWORD" && exit 1)
-
-          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/ci_keystore.jks"
-          KEYSTORE_PATH="$(realpath "$GITHUB_WORKSPACE/ci_keystore.jks")"
-
-          echo "ANDROID_KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
-          echo "ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
-          echo "ANDROID_KEY_ALIAS=$ANDROID_KEY_ALIAS" >> "$GITHUB_ENV"
-          echo "ANDROID_KEY_PASSWORD=$ANDROID_KEY_PASSWORD" >> "$GITHUB_ENV"
-
+          
+          # 验证所有必需的 secrets
+          [ -n "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ] || { echo "❌ Missing ANDROID_KEYSTORE_BASE64"; exit 1; }
+          [ -n "${{ secrets.ANDROID_KEYSTORE_PASSWORD }}" ] || { echo "❌ Missing ANDROID_KEYSTORE_PASSWORD"; exit 1; }
+          [ -n "${{ secrets.ANDROID_KEY_ALIAS }}" ] || { echo "❌ Missing ANDROID_KEY_ALIAS"; exit 1; }
+          [ -n "${{ secrets.ANDROID_KEY_PASSWORD }}" ] || { echo "❌ Missing ANDROID_KEY_PASSWORD"; exit 1; }
+          
+          # 解码 keystore
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > keystore.jks
+          KEYSTORE_PATH="$(realpath keystore.jks)"
+          
+          # 创建 key.properties（Flutter 签名配置）
+          cat > linkweb_build/android/key.properties << EOF
+          storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          storeFile=$KEYSTORE_PATH
+          EOF
+          
           echo "✅ Keystore prepared at: $KEYSTORE_PATH"
 
-      - name: "Set up JDK 17"
-        uses: "actions/setup-java@v4"
-        with:
-          distribution: "temurin"
-          java-version: "17"
-
-      - name: "Set up Android SDK"
-        uses: "android-actions/setup-android@v3"
-
-      - name: "Install build-tools (for apksigner)"
-        shell: bash
+      - name: Configure Gradle for signing
         run: |
           set -euo pipefail
-          sdkmanager "platforms;android-${ANDROID_API}" \
-                     "build-tools;${BUILD_TOOLS}" \
-                     "platform-tools"
-
-      - name: "Set up Gradle"
-        uses: "gradle/actions/setup-gradle@v4"
-
-      - name: "Build APK"
-        run: |
-          set -euo pipefail
-          ./gradlew clean assembleRelease -PversionCode=$APP_VERSION_CODE -PversionName=$APP_VERSION_NAME
-
-      - name: "Sign APK"
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Signing APK with apksigner"
-          apksigner sign --ks "$ANDROID_KEYSTORE_PATH" --ks-key-alias "$ANDROID_KEY_ALIAS" --ks-pass pass:"$ANDROID_KEYSTORE_PASSWORD" --key-pass pass:"$ANDROID_KEY_PASSWORD" --out "$GITHUB_WORKSPACE/app-release-signed.apk" "$GITHUB_WORKSPACE/app-release.apk"
-        
-      - name: "Upload artifact"
-        uses: "actions/upload-artifact@v4"
-        with:
-          name: "app-release-apk"
-          path: app-release-signed.apk
-
-      - name: "Create GitHub Release (tag only)"
-        if: startsWith(github.ref, 'refs/tags/') && ${{ github.event.inputs.upload_private_release == 'true' }}
-        uses: softprops/action-gh-release@v2
-        with:
-          files: app-release-signed.apk
-          body: ${{ github.event.inputs.release_notes }}
-
-      - name: "Create / update Release and upload APKs (PUBLIC repo)"
-        if: ${{ inputs.upload_public_release }}
-        shell: bash
-        env:
-          GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
-        run: |
-          set -euo pipefail
-          TAG="v${APP_VERSION_NAME}"
-          REPO="${{ inputs.public_release_repo }}"
-
-          gh repo view "$REPO" >/dev/null
-
-          if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
-            gh release edit "$TAG" -R "$REPO" --title "$TAG" --notes "$RELEASE_NOTES"
-          else
-            gh release create "$TAG" -R "$REPO" --title "$TAG" --notes "$RELEASE_NOTES"
+          
+          # 修改 app/build.gradle 或 app/build.gradle.kts 以使用 key.properties
+          GROOVY="linkweb_build/android/app/build.gradle"
+          KTS="linkweb_build/android/app/build.gradle.kts"
+          
+          if [ -f "$GROOVY" ]; then
+            # Groovy 格式
+            if ! grep -q "key.properties" "$GROOVY"; then
+              # 在 android { 之前添加配置
+              sed -i '/^android {/i \
+def keystoreProperties = new Properties()\
+def keystorePropertiesFile = rootProject.file("key.properties")\
+if (keystorePropertiesFile.exists()) {\
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))\
+}\
+' "$GROOVY"
+              
+              # 在 buildTypes { 内添加 signingConfigs
+              sed -i '/buildTypes {/i \
+    signingConfigs {\
+        release {\
+            keyAlias keystoreProperties["keyAlias"]\
+            keyPassword keystoreProperties["keyPassword"]\
+            storeFile file(keystoreProperties["storeFile"])\
+            storePassword keystoreProperties["storePassword"]\
+        }\
+    }\
+' "$GROOVY"
+              
+              # 修改 release buildType 使用 signingConfig
+              sed -i '/buildTypes {/,/}/ s/release {/release {\n            signingConfig signingConfigs.release/' "$GROOVY"
+            fi
+          elif [ -f "$KTS" ]; then
+            # Kotlin DSL 格式（较少见，根据需要调整）
+            echo "⚠️ Detected build.gradle.kts - manual configuration may be needed"
           fi
 
-          gh release upload "$TAG" -R "$REPO" dist/*.apk --clobber
-          echo "✅ Uploaded to https://github.com/${REPO}/releases/tag/${TAG}"
+      - name: Get dependencies
+        working-directory: linkweb_build
+        run: flutter pub get
+
+      - name: Build signed release APK
+        working-directory: linkweb_build
+        run: |
+          set -euo pipefail
+          flutter build apk --release --split-per-abi
+          
+          # 验证 APK 已签名
+          if command -v apksigner >/dev/null 2>&1; then
+            for apk in build/app/outputs/flutter-apk/app-*-release.apk; do
+              echo "Verifying: $apk"
+              apksigner verify "$apk" || { echo "❌ APK not signed properly"; exit 1; }
+            done
+          fi
+
+      - name: Rename and collect APKs
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          
+          VERSION="${{ github.event.inputs.version_name }}"
+          
+          # 重命名各架构的 APK
+          for apk in linkweb_build/build/app/outputs/flutter-apk/app-*-release.apk; do
+            if [[ $apk == *"arm64-v8a"* ]]; then
+              cp "$apk" "dist/${{ github.event.inputs.app_name }}-${VERSION}-arm64-v8a.apk"
+            elif [[ $apk == *"armeabi-v7a"* ]]; then
+              cp "$apk" "dist/${{ github.event.inputs.app_name }}-${VERSION}-armeabi-v7a.apk"
+            elif [[ $apk == *"x86_64"* ]]; then
+              cp "$apk" "dist/${{ github.event.inputs.app_name }}-${VERSION}-x86_64.apk"
+            else
+              # 通用 APK（如果只有一个）
+              cp "$apk" "dist/${{ github.event.inputs.app_name }}-${VERSION}.apk"
+            fi
+          done
+          
+          echo "✅ APKs ready:"
+          ls -lh dist/
+
+      - name: Upload APKs as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: "APKs-${{ github.run_number }}-v${{ github.event.inputs.version_name }}"
+          path: dist/*.apk
+          if-no-files-found: error
+
+      - name: Create GitHub Release
+        if: ${{ github.event.inputs.upload_to_release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          
+          TAG="v${{ github.event.inputs.version_name }}"
+          
+          # 创建或更新 Release
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo "Release $TAG already exists, updating..."
+            gh release edit "$TAG" \
+              --title "$TAG" \
+              --notes "${{ github.event.inputs.release_notes }}"
+          else
+            echo "Creating new release $TAG"
+            gh release create "$TAG" \
+              --title "$TAG" \
+              --notes "${{ github.event.inputs.release_notes }}"
+          fi
+          
+          # 上传 APKs
+          gh release upload "$TAG" dist/*.apk --clobber
+          
+          echo "✅ Release created/updated: https://github.com/${{ github.repository }}/releases/tag/${TAG}"
