@@ -1,89 +1,31 @@
-name: Build Android APK
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET"/>
 
-on:
-  workflow_dispatch:
-    inputs:
-      version_code:
-        description: 'Version code (integer)'
-        required: true
-        default: '1'
-      version_name:
-        description: 'Version name (e.g., 1.0.0)'
-        required: true
-        default: '1.0.0'
+    <application
+        android:label="LinkWeb"
+        android:name="${applicationName}"
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true">
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTop"
+            android:taskAffinity=""
+            android:theme="@style/LaunchTheme"
+            android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
+            android:hardwareAccelerated="true"
+            android:windowSoftInputMode="adjustResize">
+            <meta-data
+                android:name="io.flutter.embedding.android.NormalTheme"
+                android:resource="@style/NormalTheme"/>
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN"/>
+                <category android:name="android.intent.category.LAUNCHER"/>
+            </intent-filter>
+        </activity>
 
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v5
-
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-
-      - name: Create Flutter skeleton (Android only)
-        run: |
-          flutter create --platforms=android --org com.linkweb linkweb_build
-
-      - name: Copy sources into skeleton (overlay only)
-        run: |
-          rsync -a app/ linkweb_build/
-
-      - name: Force Android minSdk = 24 (required by webview_flutter)
-        run: |
-          set -e
-          GROOVY="linkweb_build/android/app/build.gradle"
-          KTS="linkweb_build/android/app/build.gradle.kts"
-
-          if [ -f "$GROOVY" ]; then
-            # e.g. minSdkVersion flutter.minSdkVersion  ->  minSdkVersion 24
-            sed -i -E 's/minSdkVersion[[:space:]]+[^[:space:]]+/minSdkVersion 24/' "$GROOVY"
-          elif [ -f "$KTS" ]; then
-            # e.g. minSdk = flutter.minSdkVersion  ->  minSdk = 24
-            sed -i -E 's/minSdk[[:space:]]*=[[:space:]]*[^[:space:]]+/minSdk = 24/' "$KTS"
-          else
-            echo "Gradle file not found. Listing build.gradle* under android:"
-            find linkweb_build/android -maxdepth 5 -type f -name "build.gradle*" -print
-            exit 1
-          fi
-
-      - name: Set Version Code and Version Name
-        run: |
-          echo "versionCode=${{ github.event.inputs.version_code }}" >> linkweb_build/android/app/local.properties
-          echo "versionName=${{ github.event.inputs.version_name }}" >> linkweb_build/android/app/local.properties
-
-      - name: Set up Keystore
-        run: |
-          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > keystore.jks
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-
-      - name: Build release APK
-        working-directory: linkweb_build
-        run: flutter build apk --release --no-sound-null-safety
-
-      - name: Sign APK
-        run: |
-          jarsigner -verbose -keystore keystore.jks -storepass "$ANDROID_KEYSTORE_PASSWORD" -keypass "$ANDROID_KEY_PASSWORD" linkweb_build/build/app/outputs/flutter-apk/app-release.apk "$ANDROID_KEY_ALIAS"
-
-      - name: Rename APK
-        run: |
-          cp linkweb_build/build/app/outputs/flutter-apk/app-release.apk app-release.apk
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: app-release-apk
-          path: app-release.apk
-
-      - name: Create GitHub Release (tag only)
-        if: startsWith(github.ref, 'refs/tags/')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: app-release.apk
+        <meta-data
+            android:name="flutterEmbedding"
+            android:value="2" />
+    </application>
+</manifest>
