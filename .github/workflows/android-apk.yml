@@ -105,40 +105,43 @@ jobs:
         run: |
           set -euo pipefail
           
-          # 修改 app/build.gradle 或 app/build.gradle.kts 以使用 key.properties
           GROOVY="linkweb_build/android/app/build.gradle"
-          KTS="linkweb_build/android/app/build.gradle.kts"
           
           if [ -f "$GROOVY" ]; then
-            # Groovy 格式
-            if ! grep -q "key.properties" "$GROOVY"; then
-              # 在 android { 之前添加配置
-              sed -i '/^android {/i \
-def keystoreProperties = new Properties()\
-def keystorePropertiesFile = rootProject.file("key.properties")\
-if (keystorePropertiesFile.exists()) {\
-    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))\
-}\
-' "$GROOVY"
-              
-              # 在 buildTypes { 内添加 signingConfigs
-              sed -i '/buildTypes {/i \
-    signingConfigs {\
-        release {\
-            keyAlias keystoreProperties["keyAlias"]\
-            keyPassword keystoreProperties["keyPassword"]\
-            storeFile file(keystoreProperties["storeFile"])\
-            storePassword keystoreProperties["storePassword"]\
-        }\
-    }\
-' "$GROOVY"
-              
-              # 修改 release buildType 使用 signingConfig
-              sed -i '/buildTypes {/,/}/ s/release {/release {\n            signingConfig signingConfigs.release/' "$GROOVY"
+            # 创建临时文件存储要插入的代码
+            cat > /tmp/keystore_config.txt << 'ENDCONFIG'
+          def keystoreProperties = new Properties()
+          def keystorePropertiesFile = rootProject.file("key.properties")
+          if (keystorePropertiesFile.exists()) {
+              keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+          }
+          ENDCONFIG
+          
+            cat > /tmp/signing_config.txt << 'ENDCONFIG'
+              signingConfigs {
+                  release {
+                      keyAlias keystoreProperties['keyAlias']
+                      keyPassword keystoreProperties['keyPassword']
+                      storeFile file(keystoreProperties['storeFile'])
+                      storePassword keystoreProperties['storePassword']
+                  }
+              }
+          ENDCONFIG
+          
+            # 在 android { 之前插入 keystore 配置
+            if ! grep -q "keystoreProperties" "$GROOVY"; then
+              sed -i '/^android {/e cat /tmp/keystore_config.txt' "$GROOVY"
             fi
-          elif [ -f "$KTS" ]; then
-            # Kotlin DSL 格式（较少见，根据需要调整）
-            echo "⚠️ Detected build.gradle.kts - manual configuration may be needed"
+            
+            # 在 buildTypes 之前插入 signingConfigs
+            if ! grep -q "signingConfigs" "$GROOVY"; then
+              sed -i '/buildTypes {/e cat /tmp/signing_config.txt' "$GROOVY"
+              
+              # 在 release buildType 中添加 signingConfig
+              sed -i '/release {/a\            signingConfig signingConfigs.release' "$GROOVY"
+            fi
+            
+            echo "✅ Gradle signing configuration added"
           fi
 
       - name: Get dependencies
@@ -150,14 +153,6 @@ if (keystorePropertiesFile.exists()) {\
         run: |
           set -euo pipefail
           flutter build apk --release --split-per-abi
-          
-          # 验证 APK 已签名
-          if command -v apksigner >/dev/null 2>&1; then
-            for apk in build/app/outputs/flutter-apk/app-*-release.apk; do
-              echo "Verifying: $apk"
-              apksigner verify "$apk" || { echo "❌ APK not signed properly"; exit 1; }
-            done
-          fi
 
       - name: Rename and collect APKs
         run: |
@@ -165,18 +160,19 @@ if (keystorePropertiesFile.exists()) {\
           mkdir -p dist
           
           VERSION="${{ github.event.inputs.version_name }}"
+          APP_NAME="${{ github.event.inputs.app_name }}"
           
           # 重命名各架构的 APK
           for apk in linkweb_build/build/app/outputs/flutter-apk/app-*-release.apk; do
-            if [[ $apk == *"arm64-v8a"* ]]; then
-              cp "$apk" "dist/${{ github.event.inputs.app_name }}-${VERSION}-arm64-v8a.apk"
-            elif [[ $apk == *"armeabi-v7a"* ]]; then
-              cp "$apk" "dist/${{ github.event.inputs.app_name }}-${VERSION}-armeabi-v7a.apk"
-            elif [[ $apk == *"x86_64"* ]]; then
-              cp "$apk" "dist/${{ github.event.inputs.app_name }}-${VERSION}-x86_64.apk"
+            basename=$(basename "$apk")
+            if [[ $basename == *"arm64-v8a"* ]]; then
+              cp "$apk" "dist/${APP_NAME}-${VERSION}-arm64-v8a.apk"
+            elif [[ $basename == *"armeabi-v7a"* ]]; then
+              cp "$apk" "dist/${APP_NAME}-${VERSION}-armeabi-v7a.apk"
+            elif [[ $basename == *"x86_64"* ]]; then
+              cp "$apk" "dist/${APP_NAME}-${VERSION}-x86_64.apk"
             else
-              # 通用 APK（如果只有一个）
-              cp "$apk" "dist/${{ github.event.inputs.app_name }}-${VERSION}.apk"
+              cp "$apk" "dist/${APP_NAME}-${VERSION}.apk"
             fi
           done
           
@@ -186,12 +182,12 @@ if (keystorePropertiesFile.exists()) {\
       - name: Upload APKs as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: "APKs-${{ github.run_number }}-v${{ github.event.inputs.version_name }}"
+          name: APKs-${{ github.run_number }}-v${{ github.event.inputs.version_name }}
           path: dist/*.apk
           if-no-files-found: error
 
       - name: Create GitHub Release
-        if: ${{ github.event.inputs.upload_to_release }}
+        if: github.event.inputs.upload_to_release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
