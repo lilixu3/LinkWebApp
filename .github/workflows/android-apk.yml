@@ -83,6 +83,10 @@ jobs:
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
 
+      - name: Get dependencies
+        working-directory: linkweb_build
+        run: flutter pub get
+
       - name: Build release APK
         working-directory: linkweb_build
         run: flutter build apk --release
