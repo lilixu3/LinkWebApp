@@ -85,7 +85,7 @@ jobs:
 
       - name: Build release APK
         working-directory: linkweb_build
-        run: flutter build apk --release --no-sound-null-safety
+        run: flutter build apk --release
 
       - name: Sign APK
         run: |
