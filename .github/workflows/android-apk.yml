@@ -26,13 +26,27 @@ jobs:
         run: |
           flutter create --platforms=android --org com.linkweb linkweb_build
 
-      - name: Copy sources into skeleton
+      - name: Copy sources into skeleton (overlay only)
         run: |
-          rsync -a --delete app/ linkweb_build/
+          rsync -a app/ linkweb_build/
 
-      - name: Force Android minSdkVersion = 24 (required by webview_flutter)
+      - name: Force Android minSdk = 24 (required by webview_flutter)
         run: |
-          sed -i 's/minSdkVersion .*/minSdkVersion 24/' linkweb_build/android/app/build.gradle
+          set -e
+          GROOVY="linkweb_build/android/app/build.gradle"
+          KTS="linkweb_build/android/app/build.gradle.kts"
+
+          if [ -f "$GROOVY" ]; then
+            # e.g. minSdkVersion flutter.minSdkVersion  ->  minSdkVersion 24
+            sed -i -E 's/minSdkVersion[[:space:]]+[^[:space:]]+/minSdkVersion 24/' "$GROOVY"
+          elif [ -f "$KTS" ]; then
+            # e.g. minSdk = flutter.minSdkVersion  ->  minSdk = 24
+            sed -i -E 's/minSdk[[:space:]]*=[[:space:]]*[^[:space:]]+/minSdk = 24/' "$KTS"
+          else
+            echo "Gradle file not found. Listing build.gradle* under android:"
+            find linkweb_build/android -maxdepth 5 -type f -name "build.gradle*" -print
+            exit 1
+          fi
 
       - name: Get dependencies
         working-directory: linkweb_build
