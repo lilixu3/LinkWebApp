@@ -72,10 +72,39 @@ jobs:
           flutter.versionName=${{ github.event.inputs.version_name }}
           EOF
 
-      - name: Set Application Name
+      - name: Set Application Name (支持中文)
         run: |
-          sed -i "s/android:label=\".*\"/android:label=\"${{ github.event.inputs.app_name }}\"/" \
-            linkweb_build/android/app/src/main/AndroidManifest.xml
+          APP_NAME="${{ github.event.inputs.app_name }}"
+          MANIFEST="linkweb_build/android/app/src/main/AndroidManifest.xml"
+          
+          # 使用 Python 处理中文
+          python3 << 'PYTHON_SCRIPT'
+          import re
+          import sys
+          
+          app_name = '''${{ github.event.inputs.app_name }}'''
+          manifest_path = 'linkweb_build/android/app/src/main/AndroidManifest.xml'
+          
+          with open(manifest_path, 'r', encoding='utf-8') as f:
+              content = f.read()
+          
+          # 替换 android:label
+          content = re.sub(
+              r'android:label="[^"]*"',
+              f'android:label="{app_name}"',
+              content
+          )
+          
+          with open(manifest_path, 'w', encoding='utf-8') as f:
+              f.write(content)
+          
+          print(f"✅ App name set to: {app_name}")
+          PYTHON_SCRIPT
+
+      - name: Verify Manifest
+        run: |
+          echo "📄 Checking AndroidManifest.xml:"
+          grep "android:label" linkweb_build/android/app/src/main/AndroidManifest.xml || true
 
       - name: Prepare Keystore
         run: |
@@ -91,6 +120,14 @@ jobs:
           echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > keystore.jks
           KEYSTORE_PATH="$(realpath keystore.jks)"
           
+          # 验证 keystore 文件
+          if [ ! -f "$KEYSTORE_PATH" ] || [ ! -s "$KEYSTORE_PATH" ]; then
+            echo "❌ Keystore file is empty or invalid"
+            exit 1
+          fi
+          
+          echo "✅ Keystore size: $(stat -f%z "$KEYSTORE_PATH" 2>/dev/null || stat -c%s "$KEYSTORE_PATH") bytes"
+          
           # 创建 key.properties（Flutter 签名配置）
           cat > linkweb_build/android/key.properties << EOF
           storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
@@ -100,6 +137,7 @@ jobs:
           EOF
           
           echo "✅ Keystore prepared at: $KEYSTORE_PATH"
+          echo "🔑 Key alias: ${{ secrets.ANDROID_KEY_ALIAS }}"
 
       - name: Configure Gradle for signing
         run: |
@@ -108,40 +146,47 @@ jobs:
           GROOVY="linkweb_build/android/app/build.gradle"
           
           if [ -f "$GROOVY" ]; then
-            # 创建临时文件存储要插入的代码
-            cat > /tmp/keystore_config.txt << 'ENDCONFIG'
-          def keystoreProperties = new Properties()
-          def keystorePropertiesFile = rootProject.file("key.properties")
-          if (keystorePropertiesFile.exists()) {
-              keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
-          }
-          ENDCONFIG
+            # 检查是否已经配置了签名
+            if grep -q "signingConfigs" "$GROOVY"; then
+              echo "⚠️  Signing config already exists, skipping..."
+            else
+              # 创建临时文件存储要插入的代码
+              cat > /tmp/keystore_config.txt << 'ENDCONFIG'
+
+def keystoreProperties = new Properties()
+def keystorePropertiesFile = rootProject.file("key.properties")
+if (keystorePropertiesFile.exists()) {
+    keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+}
+
+ENDCONFIG
           
-            cat > /tmp/signing_config.txt << 'ENDCONFIG'
-              signingConfigs {
-                  release {
-                      keyAlias keystoreProperties['keyAlias']
-                      keyPassword keystoreProperties['keyPassword']
-                      storeFile file(keystoreProperties['storeFile'])
-                      storePassword keystoreProperties['storePassword']
-                  }
-              }
-          ENDCONFIG
+              cat > /tmp/signing_config.txt << 'ENDCONFIG'
+
+    signingConfigs {
+        release {
+            keyAlias keystoreProperties['keyAlias']
+            keyPassword keystoreProperties['keyPassword']
+            storeFile keystoreProperties['storeFile'] ? file(keystoreProperties['storeFile']) : null
+            storePassword keystoreProperties['storePassword']
+        }
+    }
+ENDCONFIG
           
-            # 在 android { 之前插入 keystore 配置
-            if ! grep -q "keystoreProperties" "$GROOVY"; then
-              sed -i '/^android {/e cat /tmp/keystore_config.txt' "$GROOVY"
-            fi
-            
-            # 在 buildTypes 之前插入 signingConfigs
-            if ! grep -q "signingConfigs" "$GROOVY"; then
-              sed -i '/buildTypes {/e cat /tmp/signing_config.txt' "$GROOVY"
+              # 在 android { 之前插入 keystore 配置
+              sed -i '/^android {/i\'"$(cat /tmp/keystore_config.txt)" "$GROOVY"
+              
+              # 在 buildTypes 之前插入 signingConfigs
+              sed -i '/buildTypes {/i\'"$(cat /tmp/signing_config.txt)" "$GROOVY"
               
               # 在 release buildType 中添加 signingConfig
               sed -i '/release {/a\            signingConfig signingConfigs.release' "$GROOVY"
+              
+              echo "✅ Gradle signing configuration added"
             fi
             
-            echo "✅ Gradle signing configuration added"
+            echo "📄 Checking build.gradle signing config:"
+            grep -A 5 "signingConfigs" "$GROOVY" || echo "⚠️  Could not find signingConfigs block"
           fi
 
       - name: Get dependencies
@@ -153,6 +198,25 @@ jobs:
         run: |
           set -euo pipefail
           flutter build apk --release --split-per-abi
+          
+          echo "📦 Build output:"
+          find build/app/outputs -name "*.apk" -exec ls -lh {} \;
+
+      - name: Verify APK signature
+        run: |
+          echo "🔍 Verifying APK signatures..."
+          for apk in linkweb_build/build/app/outputs/flutter-apk/app-*-release.apk; do
+            if [ -f "$apk" ]; then
+              echo "Checking: $(basename "$apk")"
+              # 使用 apksigner 验证签名 (如果可用)
+              if command -v apksigner &> /dev/null; then
+                apksigner verify --verbose "$apk" || echo "⚠️  apksigner not available"
+              fi
+              # 使用 jarsigner 验证
+              jarsigner -verify -verbose -certs "$apk" | head -20 || true
+              echo "---"
+            fi
+          done
 
       - name: Rename and collect APKs
         run: |
@@ -161,18 +225,24 @@ jobs:
           
           VERSION="${{ github.event.inputs.version_name }}"
           APP_NAME="${{ github.event.inputs.app_name }}"
+          # 清理文件名中的特殊字符
+          SAFE_APP_NAME=$(echo "$APP_NAME" | tr -cd '[:alnum:]_-' || echo "LinkWeb")
           
           # 重命名各架构的 APK
           for apk in linkweb_build/build/app/outputs/flutter-apk/app-*-release.apk; do
+            if [ ! -f "$apk" ]; then
+              continue
+            fi
+            
             basename=$(basename "$apk")
             if [[ $basename == *"arm64-v8a"* ]]; then
-              cp "$apk" "dist/${APP_NAME}-${VERSION}-arm64-v8a.apk"
+              cp "$apk" "dist/${SAFE_APP_NAME}-${VERSION}-arm64-v8a.apk"
             elif [[ $basename == *"armeabi-v7a"* ]]; then
-              cp "$apk" "dist/${APP_NAME}-${VERSION}-armeabi-v7a.apk"
+              cp "$apk" "dist/${SAFE_APP_NAME}-${VERSION}-armeabi-v7a.apk"
             elif [[ $basename == *"x86_64"* ]]; then
-              cp "$apk" "dist/${APP_NAME}-${VERSION}-x86_64.apk"
+              cp "$apk" "dist/${SAFE_APP_NAME}-${VERSION}-x86_64.apk"
             else
-              cp "$apk" "dist/${APP_NAME}-${VERSION}.apk"
+              cp "$apk" "dist/${SAFE_APP_NAME}-${VERSION}.apk"
             fi
           done
           
@@ -199,12 +269,12 @@ jobs:
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG already exists, updating..."
             gh release edit "$TAG" \
-              --title "$TAG" \
+              --title "$TAG - ${{ github.event.inputs.app_name }}" \
               --notes "${{ github.event.inputs.release_notes }}"
           else
             echo "Creating new release $TAG"
             gh release create "$TAG" \
-              --title "$TAG" \
+              --title "$TAG - ${{ github.event.inputs.app_name }}" \
               --notes "${{ github.event.inputs.release_notes }}"
           fi
           
