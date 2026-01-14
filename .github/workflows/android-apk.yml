@@ -1,143 +1,167 @@
-name: Build Android APK
+name: Build APK
 
 on:
   workflow_dispatch:
     inputs:
-      version_code:
-        description: 'Version code (integer)'
-        required: true
-        default: '1'
       version_name:
-        description: 'Version name (e.g., 1.0.0)'
+        description: "App 版本号（用于 versionName 和 Release tag，比如 0.2.0）"
         required: true
-        default: '1.0.0'
-      app_name:
-        description: 'Application name'
-        required: true
-        default: 'LinkWeb'
-      upload_to_release:
-        description: 'Upload to GitHub Release'
-        required: true
-        default: 'true'
-        options:
-          - 'true'
-          - 'false'
-      release_notes:
-        description: 'Release notes for GitHub Release'
+        type: string
+
+      version_code:
+        description: "versionCode（可选；留空则使用 GITHUB_RUN_NUMBER）"
         required: false
-        default: 'No notes provided.'
+        type: string
+
+      release_notes:
+        description: "发行版说明（可选）"
+        required: false
+        type: string
+
+      upload_private_release:
+        description: "上传到【当前仓库】的 GitHub Release（私有仓库用）"
+        required: true
+        type: boolean
+        default: false
+
+      upload_public_release:
+        description: "上传到【公共仓库】的 GitHub Release（不给看源码用）"
+        required: true
+        type: boolean
+        default: true
+
+      public_release_repo:
+        description: "公共发行仓库（owner/repo），例如 lilixu3/danmu-api-android"
+        required: true
+        type: string
+        default: "lilixu3/danmu-api-android"
+
+permissions:
+  contents: write
+
+env:
+  ANDROID_API: "34"
+  BUILD_TOOLS: "34.0.0"
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
 
     steps:
-      - name: Checkout
-        uses: actions/checkout@v5
+      - name: "Checkout repo"
+        uses: "actions/checkout@v4"
 
-      - name: Setup Flutter
-        uses: subosito/flutter-action@v2
-        with:
-          channel: stable
-
-      - name: Create Flutter skeleton (Android only)
+      - name: "Resolve version inputs"
+        shell: bash
         run: |
-          flutter create --platforms=android --org com.linkweb linkweb_build
+          set -euo pipefail
+          VN="${{ inputs.version_name }}"
+          VN="${VN#v}"; VN="${VN#V}"
+          echo "APP_VERSION_NAME=$VN" >> "$GITHUB_ENV"
 
-      - name: Copy sources into skeleton (overlay only)
-        run: |
-          rsync -a app/ linkweb_build/
-
-      - name: Force Android minSdk = 24 (required by webview_flutter)
-        run: |
-          set -e
-          GROOVY="linkweb_build/android/app/build.gradle"
-          KTS="linkweb_build/android/app/build.gradle.kts"
-
-          if [ -f "$GROOVY" ]; then
-            # e.g. minSdkVersion flutter.minSdkVersion  ->  minSdkVersion 24
-            sed -i -E 's/minSdkVersion[[:space:]]+[^[:space:]]+/minSdkVersion 24/' "$GROOVY"
-          elif [ -f "$KTS" ]; then
-            # e.g. minSdk = flutter.minSdkVersion  ->  minSdk = 24
-            sed -i -E 's/minSdk[[:space:]]*=[[:space:]]*[^[:space:]]+/minSdk = 24/' "$KTS"
+          VC="${{ inputs.version_code }}"
+          if [ -n "${VC:-}" ]; then
+            echo "APP_VERSION_CODE=$VC" >> "$GITHUB_ENV"
           else
-            echo "Gradle file not found. Listing build.gradle* under android:"
-            find linkweb_build/android -maxdepth 5 -type f -name "build.gradle*" -print
-            exit 1
+            echo "APP_VERSION_CODE=${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
           fi
 
-      - name: Set Version Code and Version Name
-        run: |
-          echo "versionCode=${{ github.event.inputs.version_code }}" >> linkweb_build/android/app/local.properties
-          echo "versionName=${{ github.event.inputs.version_name }}" >> linkweb_build/android/app/local.properties
+          NOTES="${{ inputs.release_notes }}"
+          if [ -z "${NOTES:-}" ]; then
+            NOTES="Automated build for v$VN"
+          fi
+          {
+            echo "RELEASE_NOTES<<EOF"
+            echo "$NOTES"
+            echo "EOF"
+          } >> "$GITHUB_ENV"
 
-      - name: Set Application Name
-        run: |
-          sed -i "s/android:label=\".*\"/android:label=\"${{ github.event.inputs.app_name }}\"/" linkweb_build/android/app/src/main/AndroidManifest.xml
-
-      - name: Set up Keystore
-        run: |
-          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > keystore.jks
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-
-      - name: Print Keystore Information (for debugging)
-        run: |
-          keytool -list -v -keystore keystore.jks
-        env:
-          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-
-      - name: Get dependencies
-        working-directory: linkweb_build
-        run: flutter pub get
-
-      - name: Install Android SDK command line tools (for apksigner)
-        run: |
-          sudo apt update
-          sudo apt install -y wget unzip openjdk-11-jdk
-          wget https://dl.google.com/android/repository/commandlinetools-linux-7583922_latest.zip
-          unzip commandlinetools-linux-7583922_latest.zip -d $HOME/Android
-          mkdir -p $HOME/Android/Sdk/cmdline-tools
-          mv $HOME/Android/cmdline-tools/* $HOME/Android/Sdk/cmdline-tools/
-          
-          # Set environment variables
-          export ANDROID_HOME=$HOME/Android/Sdk
-          export PATH=$PATH:$ANDROID_HOME/cmdline-tools/latest/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/build-tools/30.0.3
-          
-          # Install build tools and update SDK manager
-          $HOME/Android/Sdk/cmdline-tools/latest/bin/sdkmanager --update
-          $HOME/Android/Sdk/cmdline-tools/latest/bin/sdkmanager "build-tools;30.0.3"
-        env:
-          ANDROID_HOME: $HOME/Android/Sdk
-
-      - name: Build release APK
-        working-directory: linkweb_build
-        run: flutter build apk --release
-
-      - name: Sign APK with apksigner
-        run: |
-          $HOME/Android/Sdk/cmdline-tools/latest/bin/apksigner sign --ks keystore.jks --ks-key-alias "$ANDROID_KEY_ALIAS" --ks-pass pass:"$ANDROID_KEYSTORE_PASSWORD" --key-pass pass:"$ANDROID_KEY_PASSWORD" --out linkweb_build/build/app/outputs/flutter-apk/app-release-signed.apk linkweb_build/build/app/outputs/flutter-apk/app-release.apk
+      - name: "Prepare signing keystore (REQUIRED, fixed secrets)"
+        shell: bash
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
           ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
           ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
           ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-
-      - name: Rename APK
         run: |
-          cp linkweb_build/build/app/outputs/flutter-apk/app-release-signed.apk app-release.apk
+          set -euo pipefail
+          [ -n "${ANDROID_KEYSTORE_BASE64:-}" ] || (echo "❌ Missing ANDROID_KEYSTORE_BASE64" && exit 1)
+          [ -n "${ANDROID_KEYSTORE_PASSWORD:-}" ] || (echo "❌ Missing ANDROID_KEYSTORE_PASSWORD" && exit 1)
+          [ -n "${ANDROID_KEY_ALIAS:-}" ] || (echo "❌ Missing ANDROID_KEY_ALIAS" && exit 1)
+          [ -n "${ANDROID_KEY_PASSWORD:-}" ] || (echo "❌ Missing ANDROID_KEY_PASSWORD" && exit 1)
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+          echo "$ANDROID_KEYSTORE_BASE64" | base64 -d > "$GITHUB_WORKSPACE/ci_keystore.jks"
+          KEYSTORE_PATH="$(realpath "$GITHUB_WORKSPACE/ci_keystore.jks")"
+
+          echo "ANDROID_KEYSTORE_PATH=$KEYSTORE_PATH" >> "$GITHUB_ENV"
+          echo "ANDROID_KEYSTORE_PASSWORD=$ANDROID_KEYSTORE_PASSWORD" >> "$GITHUB_ENV"
+          echo "ANDROID_KEY_ALIAS=$ANDROID_KEY_ALIAS" >> "$GITHUB_ENV"
+          echo "ANDROID_KEY_PASSWORD=$ANDROID_KEY_PASSWORD" >> "$GITHUB_ENV"
+
+          echo "✅ Keystore prepared at: $KEYSTORE_PATH"
+
+      - name: "Set up JDK 17"
+        uses: "actions/setup-java@v4"
         with:
-          name: app-release-apk
-          path: app-release.apk
+          distribution: "temurin"
+          java-version: "17"
 
-      - name: Create GitHub Release (tag only)
-        if: startsWith(github.ref, 'refs/tags/') && ${{ github.event.inputs.upload_to_release == 'true' }}
+      - name: "Set up Android SDK"
+        uses: "android-actions/setup-android@v3"
+
+      - name: "Install build-tools (for apksigner)"
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager "platforms;android-${ANDROID_API}" \
+                     "build-tools;${BUILD_TOOLS}" \
+                     "platform-tools"
+
+      - name: "Set up Gradle"
+        uses: "gradle/actions/setup-gradle@v4"
+
+      - name: "Build APK"
+        run: |
+          set -euo pipefail
+          ./gradlew clean assembleRelease -PversionCode=$APP_VERSION_CODE -PversionName=$APP_VERSION_NAME
+
+      - name: "Sign APK"
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "Signing APK with apksigner"
+          apksigner sign --ks "$ANDROID_KEYSTORE_PATH" --ks-key-alias "$ANDROID_KEY_ALIAS" --ks-pass pass:"$ANDROID_KEYSTORE_PASSWORD" --key-pass pass:"$ANDROID_KEY_PASSWORD" --out "$GITHUB_WORKSPACE/app-release-signed.apk" "$GITHUB_WORKSPACE/app-release.apk"
+        
+      - name: "Upload artifact"
+        uses: "actions/upload-artifact@v4"
+        with:
+          name: "app-release-apk"
+          path: app-release-signed.apk
+
+      - name: "Create GitHub Release (tag only)"
+        if: startsWith(github.ref, 'refs/tags/') && ${{ github.event.inputs.upload_private_release == 'true' }}
         uses: softprops/action-gh-release@v2
         with:
-          files: app-release.apk
+          files: app-release-signed.apk
           body: ${{ github.event.inputs.release_notes }}
+
+      - name: "Create / update Release and upload APKs (PUBLIC repo)"
+        if: ${{ inputs.upload_public_release }}
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="v${APP_VERSION_NAME}"
+          REPO="${{ inputs.public_release_repo }}"
+
+          gh repo view "$REPO" >/dev/null
+
+          if gh release view "$TAG" -R "$REPO" >/dev/null 2>&1; then
+            gh release edit "$TAG" -R "$REPO" --title "$TAG" --notes "$RELEASE_NOTES"
+          else
+            gh release create "$TAG" -R "$REPO" --title "$TAG" --notes "$RELEASE_NOTES"
+          fi
+
+          gh release upload "$TAG" -R "$REPO" dist/*.apk --clobber
+          echo "✅ Uploaded to https://github.com/${REPO}/releases/tag/${TAG}"
