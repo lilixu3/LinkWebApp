@@ -93,6 +93,18 @@ jobs:
         working-directory: linkweb_build
         run: flutter pub get
 
+      - name: Install Android SDK and Build Tools (for apksigner)
+        run: |
+          sudo apt update
+          sudo apt install -y openjdk-11-jdk
+          mkdir -p $HOME/Android/Sdk
+          export ANDROID_HOME=$HOME/Android/Sdk
+          export PATH=$PATH:$ANDROID_HOME/tools:$ANDROID_HOME/tools/bin:$ANDROID_HOME/platform-tools:$ANDROID_HOME/build-tools/30.0.3
+          sdkmanager --update
+          sdkmanager "build-tools;30.0.3"
+        env:
+          ANDROID_HOME: $HOME/Android/Sdk
+
       - name: Build release APK
         working-directory: linkweb_build
         run: flutter build apk --release
