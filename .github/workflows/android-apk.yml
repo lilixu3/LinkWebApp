@@ -83,6 +83,12 @@ jobs:
         env:
           ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
 
+      - name: Print Keystore Information (for debugging)
+        run: |
+          keytool -list -v -keystore keystore.jks
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+
       - name: Get dependencies
         working-directory: linkweb_build
         run: flutter pub get
@@ -91,13 +97,18 @@ jobs:
         working-directory: linkweb_build
         run: flutter build apk --release
 
-      - name: Sign APK
+      - name: Sign APK with apksigner
         run: |
-          jarsigner -verbose -keystore keystore.jks -storepass "$ANDROID_KEYSTORE_PASSWORD" -keypass "$ANDROID_KEY_PASSWORD" linkweb_build/build/app/outputs/flutter-apk/app-release.apk "$ANDROID_KEY_ALIAS"
+          apksigner sign --ks keystore.jks --ks-key-alias "$ANDROID_KEY_ALIAS" --ks-pass pass:"$ANDROID_KEYSTORE_PASSWORD" --key-pass pass:"$ANDROID_KEY_PASSWORD" --out linkweb_build/build/app/outputs/flutter-apk/app-release-signed.apk linkweb_build/build/app/outputs/flutter-apk/app-release.apk
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
 
       - name: Rename APK
         run: |
-          cp linkweb_build/build/app/outputs/flutter-apk/app-release.apk app-release.apk
+          cp linkweb_build/build/app/outputs/flutter-apk/app-release-signed.apk app-release.apk
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
