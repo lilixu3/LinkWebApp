@@ -1,0 +1,59 @@
+name: Build Android APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ "main" ]
+    tags:
+      - "v*"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Create Flutter skeleton (Android only)
+        run: |
+          flutter create --platforms=android --org com.linkweb linkweb_build
+
+      - name: Copy sources into skeleton
+        run: |
+          rsync -a --delete app/ linkweb_build/
+
+      - name: Force Android minSdkVersion = 24 (required by webview_flutter)
+        run: |
+          sed -i 's/minSdkVersion .*/minSdkVersion 24/' linkweb_build/android/app/build.gradle
+
+      - name: Get dependencies
+        working-directory: linkweb_build
+        run: flutter pub get
+
+      - name: Build release APK
+        working-directory: linkweb_build
+        run: flutter build apk --release
+
+      - name: Rename APK
+        run: |
+          cp linkweb_build/build/app/outputs/flutter-apk/app-release.apk app-release.apk
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-release-apk
+          path: app-release.apk
+
+      - name: Create GitHub Release (tag only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: app-release.apk
