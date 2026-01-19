@@ -24,8 +24,6 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   WebViewController? _controller;
   final ValueNotifier<int> _progress = ValueNotifier<int>(0);
-  final ValueNotifier<bool> _canGoBack = ValueNotifier<bool>(false);
-  final ValueNotifier<bool> _canGoForward = ValueNotifier<bool>(false);
   final ValueNotifier<String> _currentUrl = ValueNotifier<String>(UrlUtils.fallback);
   final ValueNotifier<String> _pageTitle = ValueNotifier<String>('');
 
@@ -80,13 +78,11 @@ class _HomePageState extends State<HomePage> {
           onPageStarted: (u) {
             _lastError = null;
             _currentUrl.value = u;
-            _updateNavButtons();
-          },
+                      },
           onPageFinished: (u) async {
             _currentUrl.value = u;
             _pageTitle.value = (await controller.getTitle()) ?? '';
-            _updateNavButtons();
-          },
+                      },
           onWebResourceError: (error) {
             log.w('web error: ${error.errorType} ${error.description}');
             _lastError = error.description;
@@ -128,19 +124,11 @@ class _HomePageState extends State<HomePage> {
     setState(() => _controller = controller);
   }
 
-  Future<void> _updateNavButtons() async {
-    final c = _controller;
-    if (c == null) return;
-    _canGoBack.value = await c.canGoBack();
-    _canGoForward.value = await c.canGoForward();
-  }
 
   @override
   void dispose() {
     _connSub?.cancel();
     _progress.dispose();
-    _canGoBack.dispose();
-    _canGoForward.dispose();
     _currentUrl.dispose();
     _pageTitle.dispose();
     super.dispose();
@@ -301,22 +289,6 @@ class _HomePageState extends State<HomePage> {
             ),
           ),
           actions: [
-            ValueListenableBuilder<bool>(
-              valueListenable: _canGoBack,
-              builder: (context, canBack, _) => IconButton(
-                tooltip: '后退',
-                onPressed: canBack && controller != null ? () => controller.goBack() : null,
-                icon: const Icon(Icons.arrow_back),
-              ),
-            ),
-            ValueListenableBuilder<bool>(
-              valueListenable: _canGoForward,
-              builder: (context, canForward, _) => IconButton(
-                tooltip: '前进',
-                onPressed: canForward && controller != null ? () => controller.goForward() : null,
-                icon: const Icon(Icons.arrow_forward),
-              ),
-            ),
             IconButton(
               tooltip: '主页',
               onPressed: controller == null
@@ -477,11 +449,7 @@ class _HomePageState extends State<HomePage> {
               ),
           ],
         ),
-        floatingActionButton: FloatingActionButton.extended(
-          onPressed: _promptGoTo,
-          icon: const Icon(Icons.search),
-          label: const Text('打开'),
-        ),
+        // FAB removed: open/search is available via tapping the title bar or Settings sheet.
       ),
     );
   }
