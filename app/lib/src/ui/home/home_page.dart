@@ -69,7 +69,10 @@ class _HomePageState extends State<HomePage> {
   Future<void> _createController(AppState state, {String? initialUrl}) async {
     final url = initialUrl ?? state.homeUrl;
 
-    final controller = WebViewController()
+    // NOTE: Don't reference a local variable inside its own initializer.
+    // We declare first, then configure, to keep `flutter analyze` happy.
+    final controller = WebViewController();
+    controller
       ..setJavaScriptMode(state.javascriptEnabled ? JavaScriptMode.unrestricted : JavaScriptMode.disabled)
       ..setNavigationDelegate(
         NavigationDelegate(
@@ -144,7 +147,6 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _openSettings() async {
-    final state = context.read<AppState>();
     final c = _controller;
 
     await showModalBottomSheet<void>(
@@ -152,16 +154,16 @@ class _HomePageState extends State<HomePage> {
       isScrollControlled: true,
       showDragHandle: true,
       builder: (_) => SettingsSheet(
+        currentUrl: _currentUrl.value,
+        currentTitle: _pageTitle.value,
         onOpenUrl: (url) async {
-          await state.setHomeUrl(url);
-          await c?.loadRequest(Uri.parse(state.homeUrl));
-        },
-        onGoToUrl: (url) async {
           final normalized = UrlUtils.normalize(url);
           await c?.loadRequest(Uri.parse(normalized));
         },
-        onClearWebData: () async {
+        onClearCache: () async {
           await c?.clearCache();
+        },
+        onClearCookies: () async {
           final cookieManager = WebViewCookieManager();
           await cookieManager.clearCookies();
         },
@@ -274,7 +276,7 @@ class _HomePageState extends State<HomePage> {
 
     return PopScope(
       canPop: false,
-      onPopInvoked: (didPop) async {
+      onPopInvokedWithResult: (didPop, result) async {
         if (didPop) return;
         await _handleBack();
       },

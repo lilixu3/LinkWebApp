@@ -7,6 +7,7 @@ final log = Logger(
     lineLength: 100,
     colors: false,
     printEmojis: true,
-    printTime: true,
+    // `printTime` is deprecated in newer logger versions.
+    dateTimeFormat: DateTimeFormat.onlyTimeAndSinceStart,
   ),
 );
