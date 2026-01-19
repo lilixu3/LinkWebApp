@@ -27,6 +27,9 @@ class _HomePageState extends State<HomePage> {
   final ValueNotifier<String> _currentUrl = ValueNotifier<String>(UrlUtils.fallback);
   final ValueNotifier<String> _pageTitle = ValueNotifier<String>('');
 
+  // Fullscreen handling (HTML5 video fullscreen -> allow landscape like browser)
+  bool _isFullscreen = false;
+
   StreamSubscription<List<ConnectivityResult>>? _connSub;
   bool _isOffline = false;
   DateTime? _lastBack;
@@ -82,6 +85,16 @@ class _HomePageState extends State<HomePage> {
           onPageFinished: (u) async {
             _currentUrl.value = u;
             _pageTitle.value = (await controller.getTitle()) ?? '';
+
+            // Inject fullscreen listener for sites that use the Fullscreen API.
+            // This lets us switch the app orientation to landscape when video enters fullscreen.
+            if (state.javascriptEnabled) {
+              try {
+                await controller.runJavaScript(_fullscreenHookJs);
+              } catch (_) {
+                // Ignore - some pages may block injection.
+              }
+            }
                       },
           onWebResourceError: (error) {
             log.w('web error: ${error.errorType} ${error.description}');
@@ -111,6 +124,12 @@ class _HomePageState extends State<HomePage> {
         ),
       );
 
+    // JS channel to receive fullscreen enter/exit events from injected script.
+    controller.addJavaScriptChannel(
+      'LinkWebFullscreen',
+      onMessageReceived: (msg) => _handleFullscreenMessage(msg.message),
+    );
+
     // Desktop mode (User-Agent)
     if (state.desktopMode) {
       await controller.setUserAgent(
@@ -124,10 +143,66 @@ class _HomePageState extends State<HomePage> {
     setState(() => _controller = controller);
   }
 
+  static const String _fullscreenHookJs = r"""
+(function() {
+  try {
+    if (window.__linkweb_fullscreen_hooked) return;
+    window.__linkweb_fullscreen_hooked = true;
+
+    function post(v) {
+      try { LinkWebFullscreen.postMessage(v ? '1' : '0'); } catch (e) {}
+    }
+
+    function handler() {
+      var el = document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement;
+      post(!!el);
+    }
+
+    document.addEventListener('fullscreenchange', handler);
+    document.addEventListener('webkitfullscreenchange', handler);
+    document.addEventListener('mozfullscreenchange', handler);
+    document.addEventListener('MSFullscreenChange', handler);
+
+    // Fire once in case page is already fullscreen.
+    handler();
+  } catch (e) {}
+})();
+""";
+
+  Future<void> _handleFullscreenMessage(String message) async {
+    final m = message.trim().toLowerCase();
+    final isFs = m == '1' || m == 'true' || m == 'yes' || m == 'on';
+    if (isFs == _isFullscreen) return;
+    _isFullscreen = isFs;
+    await _applyFullscreenMode(isFs);
+  }
+
+  Future<void> _applyFullscreenMode(bool fullscreen) async {
+    // Mimic browser behavior: when video goes fullscreen, allow landscape and hide system UI.
+    // When exiting fullscreen, restore normal UI and portrait.
+    try {
+      if (fullscreen) {
+        await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+        await SystemChrome.setPreferredOrientations(
+          const [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight],
+        );
+      } else {
+        await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+        await SystemChrome.setPreferredOrientations(
+          const [DeviceOrientation.portraitUp],
+        );
+      }
+    } catch (_) {
+      // Best-effort: some platforms may ignore orientation constraints.
+    }
+  }
+
 
   @override
   void dispose() {
     _connSub?.cancel();
+    // Make sure we never leave the app stuck in landscape if the page was fullscreen.
+    _applyFullscreenMode(false);
     _progress.dispose();
     _currentUrl.dispose();
     _pageTitle.dispose();
