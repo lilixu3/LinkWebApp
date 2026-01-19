@@ -430,7 +430,8 @@ class _HomePageState extends State<HomePage> {
             if (_lastError != null)
               Positioned.fill(
                 child: Container(
-                  color: Theme.of(context).colorScheme.surface.withOpacity(0.92),
+                  // Avoid deprecated withOpacity (precision loss). Use alpha channel explicitly.
+                  color: Theme.of(context).colorScheme.surface.withAlpha(235),
                   child: Center(
                     child: Padding(
                       padding: const EdgeInsets.all(20),

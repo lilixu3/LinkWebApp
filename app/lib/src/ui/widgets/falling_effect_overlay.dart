@@ -162,12 +162,13 @@ class _ParticlePainter extends CustomPainter {
       canvas.rotate(p.rotation);
 
       if (type == EffectType.snow) {
-        paint.color = Colors.white.withOpacity(0.75);
+        // Avoid deprecated withOpacity (precision loss). Use explicit alpha.
+        paint.color = Colors.white.withAlpha(191);
         canvas.drawCircle(Offset.zero, p.size, paint);
       } else if (type == EffectType.sakura) {
         final s = p.size;
         paint.color = (dark ? const Color(0xFFFFC1D9) : const Color(0xFFFF8FBF))
-            .withOpacity(0.75);
+            .withAlpha(191);
         final path = Path()
           ..moveTo(0, -s)
           ..quadraticBezierTo(s * 0.85, -s * 0.25, 0, s)
@@ -178,7 +179,7 @@ class _ParticlePainter extends CustomPainter {
         final stroke = Paint()
           ..style = PaintingStyle.stroke
           ..strokeWidth = 0.8
-          ..color = Colors.white.withOpacity(0.25);
+          ..color = Colors.white.withAlpha(64);
         canvas.drawLine(Offset(0, -s * 0.7), Offset(0, s * 0.7), stroke);
       }
 
