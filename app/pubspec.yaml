@@ -1,7 +1,7 @@
 name: linkweb
-description: Turn a URL into a lightweight webview app, with theme & falling effects.
+description: Turn a URL into a lightweight, production-ready webview app.
 publish_to: "none"
-version: 0.1.0+1
+version: 1.0.0+1
 
 environment:
   sdk: ">=3.4.0 <4.0.0"
@@ -11,11 +11,35 @@ dependencies:
     sdk: flutter
   webview_flutter: ^4.13.1
   shared_preferences: ^2.5.4
+  provider: ^6.1.2
+  connectivity_plus: ^6.1.0
+  url_launcher: ^6.3.0
+  share_plus: ^10.0.2
+  package_info_plus: ^8.0.3
+  logger: ^2.5.0
 
 dev_dependencies:
   flutter_test:
     sdk: flutter
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.2
+  flutter_native_splash: ^2.4.4
 
 flutter:
   uses-material-design: true
+  assets:
+    - assets/
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: assets/icon.png
+
+flutter_native_splash:
+  color: "#FFFFFF"
+  color_dark: "#0B0B0B"
+  image: assets/icon.png
+  android_12:
+    image: assets/icon.png
+    color: "#FFFFFF"
+    color_dark: "#0B0B0B"
