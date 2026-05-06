@@ -424,9 +424,54 @@ class _HomePageState extends State<HomePage> {
               },
             ),
             IconButton(
-              tooltip: '设置',
-              onPressed: _openSettings,
-              icon: const Icon(Icons.tune),
+              tooltip: '刷新',
+              onPressed: controller == null ? null : () => _reload(),
+              icon: const Icon(Icons.refresh),
+            ),
+            PopupMenuButton<String>(
+              tooltip: '更多',
+              onSelected: (value) async {
+                switch (value) {
+                  case 'back':
+                    await _handleBack();
+                    break;
+                  case 'forward':
+                    if (await (_controller?.canGoForward() ?? Future.value(false))) {
+                      await _controller?.goForward();
+                    }
+                    break;
+                  case 'home':
+                    await _goHome();
+                    break;
+                  case 'share':
+                    await _share();
+                    break;
+                  case 'copy':
+                    await _copyLink();
+                    break;
+                  case 'external':
+                    await _openExternal();
+                    break;
+                  case 'hardReload':
+                    await _reload(hard: true);
+                    break;
+                  case 'settings':
+                    await _openSettings();
+                    break;
+                }
+              },
+              itemBuilder: (context) => const [
+                PopupMenuItem(value: 'back', child: ListTile(leading: Icon(Icons.arrow_back), title: Text('后退'))),
+                PopupMenuItem(value: 'forward', child: ListTile(leading: Icon(Icons.arrow_forward), title: Text('前进'))),
+                PopupMenuItem(value: 'home', child: ListTile(leading: Icon(Icons.home_outlined), title: Text('回到主页'))),
+                PopupMenuDivider(),
+                PopupMenuItem(value: 'share', child: ListTile(leading: Icon(Icons.share), title: Text('分享'))),
+                PopupMenuItem(value: 'copy', child: ListTile(leading: Icon(Icons.copy), title: Text('复制链接'))),
+                PopupMenuItem(value: 'external', child: ListTile(leading: Icon(Icons.open_in_new), title: Text('外部浏览器打开'))),
+                PopupMenuDivider(),
+                PopupMenuItem(value: 'hardReload', child: ListTile(leading: Icon(Icons.delete_sweep), title: Text('清理缓存后刷新'))),
+                PopupMenuItem(value: 'settings', child: ListTile(leading: Icon(Icons.tune), title: Text('设置'))),
+              ],
             ),
           ],
           bottom: PreferredSize(
@@ -456,58 +501,6 @@ class _HomePageState extends State<HomePage> {
               ),
             if (_isOffline) _OfflineBanner(onRetry: () => _reload()),
             if (_lastError != null) _ErrorOverlay(error: _lastError!, onClose: () => setState(() => _lastError = null), onRetry: () => _reload()),
-          ],
-        ),
-        bottomNavigationBar: NavigationBar(
-          selectedIndex: 0,
-          onDestinationSelected: (index) async {
-            switch (index) {
-              case 0:
-                await _handleBack();
-                break;
-              case 1:
-                if (await (_controller?.canGoForward() ?? Future.value(false))) await _controller?.goForward();
-                break;
-              case 2:
-                await _goHome();
-                break;
-              case 3:
-                await _reload();
-                break;
-              case 4:
-                await _openSettings();
-                break;
-            }
-          },
-          destinations: const [
-            NavigationDestination(icon: Icon(Icons.arrow_back), label: '后退'),
-            NavigationDestination(icon: Icon(Icons.arrow_forward), label: '前进'),
-            NavigationDestination(icon: Icon(Icons.home_outlined), label: '主页'),
-            NavigationDestination(icon: Icon(Icons.refresh), label: '刷新'),
-            NavigationDestination(icon: Icon(Icons.menu), label: '更多'),
-          ],
-        ),
-        floatingActionButton: FloatingActionButton.small(
-          tooltip: '分享 / 复制 / 外部打开',
-          onPressed: () => _showQuickActions(context),
-          child: const Icon(Icons.ios_share),
-        ),
-      ),
-    );
-  }
-
-  Future<void> _showQuickActions(BuildContext context) async {
-    await showModalBottomSheet<void>(
-      context: context,
-      showDragHandle: true,
-      builder: (context) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(leading: const Icon(Icons.share), title: const Text('分享'), onTap: () async { Navigator.pop(context); await _share(); }),
-            ListTile(leading: const Icon(Icons.copy), title: const Text('复制链接'), onTap: () async { Navigator.pop(context); await _copyLink(); }),
-            ListTile(leading: const Icon(Icons.open_in_new), title: const Text('外部浏览器打开'), onTap: () async { Navigator.pop(context); await _openExternal(); }),
-            ListTile(leading: const Icon(Icons.delete_sweep), title: const Text('清理缓存后刷新'), onTap: () async { Navigator.pop(context); await _reload(hard: true); }),
           ],
         ),
       ),
