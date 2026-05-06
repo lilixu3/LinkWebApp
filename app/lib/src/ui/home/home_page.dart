@@ -24,17 +24,16 @@ class HomePage extends StatefulWidget {
 class _HomePageState extends State<HomePage> {
   WebViewController? _controller;
   final ValueNotifier<int> _progress = ValueNotifier<int>(0);
-  final ValueNotifier<String> _currentUrl = ValueNotifier<String>(UrlUtils.fallback);
+  final ValueNotifier<String> _currentUrl = ValueNotifier<String>('');
   final ValueNotifier<String> _pageTitle = ValueNotifier<String>('');
-
-  // Fullscreen handling (HTML5 video fullscreen -> allow landscape like browser)
-  bool _isFullscreen = false;
 
   StreamSubscription<List<ConnectivityResult>>? _connSub;
   bool _isOffline = false;
+  bool _isFullscreen = false;
+  bool _jsMode = true;
+  bool _desktopMode = false;
+  OrientationLock? _appliedOrientation;
   DateTime? _lastBack;
-
-  // Web errors
   String? _lastError;
 
   @override
@@ -47,16 +46,26 @@ class _HomePageState extends State<HomePage> {
   void didChangeDependencies() {
     super.didChangeDependencies();
     final state = context.watch<AppState>();
+    if (!_isFullscreen && _appliedOrientation != state.orientationLock) {
+      _appliedOrientation = state.orientationLock;
+      unawaited(_applyOrientation(state.orientationLock));
+    }
 
-    // (Re)create controller when first time, or when JS mode needs to change.
-    final shouldRecreate = _controller == null || (_controller != null && _jsMode != state.javascriptEnabled);
-    if (shouldRecreate) {
+    if (!state.isConfigured) {
+      _controller = null;
+      return;
+    }
+
+    final needsController = _controller == null ||
+        _jsMode != state.javascriptEnabled ||
+        _desktopMode != state.desktopMode;
+    if (needsController) {
       _jsMode = state.javascriptEnabled;
-      _createController(state);
+      _desktopMode = state.desktopMode;
+      final target = _currentUrl.value.trim().isNotEmpty ? _currentUrl.value : state.launchUrl;
+      unawaited(_createController(state, initialUrl: target));
     }
   }
-
-  bool _jsMode = true;
 
   void _listenConnectivity() {
     _connSub = Connectivity().onConnectivityChanged.listen((results) {
@@ -67,35 +76,34 @@ class _HomePageState extends State<HomePage> {
     });
   }
 
-  Future<void> _createController(AppState state, {String? initialUrl}) async {
-    final url = initialUrl ?? state.homeUrl;
-
-    // NOTE: Don't reference a local variable inside its own initializer.
-    // We declare first, then configure, to keep `flutter analyze` happy.
+  Future<void> _createController(AppState state, {required String initialUrl}) async {
     final controller = WebViewController();
     controller
       ..setJavaScriptMode(state.javascriptEnabled ? JavaScriptMode.unrestricted : JavaScriptMode.disabled)
       ..setNavigationDelegate(
         NavigationDelegate(
           onProgress: (p) => _progress.value = p,
-          onPageStarted: (u) {
+          onPageStarted: (url) {
             _lastError = null;
-            _currentUrl.value = u;
-                      },
-          onPageFinished: (u) async {
-            _currentUrl.value = u;
+            _currentUrl.value = url;
+            if (mounted) {
+              unawaited(context.read<AppState>().rememberCurrentUrl(url));
+              setState(() {});
+            }
+          },
+          onPageFinished: (url) async {
+            _currentUrl.value = url;
             _pageTitle.value = (await controller.getTitle()) ?? '';
-
-            // Inject fullscreen listener for sites that use the Fullscreen API.
-            // This lets us switch the app orientation to landscape when video enters fullscreen.
+            if (!mounted) return;
+            unawaited(context.read<AppState>().rememberCurrentUrl(url));
             if (state.javascriptEnabled) {
               try {
                 await controller.runJavaScript(_fullscreenHookJs);
               } catch (_) {
-                // Ignore - some pages may block injection.
+                // Some pages block injected scripts. This should not break normal browsing.
               }
             }
-                      },
+          },
           onWebResourceError: (error) {
             log.w('web error: ${error.errorType} ${error.description}');
             _lastError = error.description;
@@ -104,11 +112,7 @@ class _HomePageState extends State<HomePage> {
           onNavigationRequest: (request) async {
             final uri = Uri.tryParse(request.url);
             if (uri == null) return NavigationDecision.prevent;
-
-            // Allow normal web schemes inside WebView.
             if (UrlUtils.isWebScheme(uri)) return NavigationDecision.navigate;
-
-            // Try open other schemes externally (tel:, wechat:, mailto:, intent:, etc.)
             try {
               final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
               if (!ok && mounted) {
@@ -122,25 +126,26 @@ class _HomePageState extends State<HomePage> {
             return NavigationDecision.prevent;
           },
         ),
+      )
+      ..addJavaScriptChannel(
+        'LinkWebFullscreen',
+        onMessageReceived: (msg) => _handleFullscreenMessage(msg.message),
       );
 
-    // JS channel to receive fullscreen enter/exit events from injected script.
-    controller.addJavaScriptChannel(
-      'LinkWebFullscreen',
-      onMessageReceived: (msg) => _handleFullscreenMessage(msg.message),
-    );
-
-    // Desktop mode (User-Agent)
     if (state.desktopMode) {
       await controller.setUserAgent(
-        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36',
+        'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36',
       );
     }
 
-    await controller.loadRequest(Uri.parse(UrlUtils.normalize(url)));
-
+    final url = UrlUtils.normalize(initialUrl);
     if (!mounted) return;
-    setState(() => _controller = controller);
+    setState(() {
+      _controller = controller;
+      _currentUrl.value = url;
+      _lastError = null;
+    });
+    await controller.loadRequest(Uri.parse(url));
   }
 
   static const String _fullscreenHookJs = r"""
@@ -148,61 +153,69 @@ class _HomePageState extends State<HomePage> {
   try {
     if (window.__linkweb_fullscreen_hooked) return;
     window.__linkweb_fullscreen_hooked = true;
-
     function post(v) {
       try { LinkWebFullscreen.postMessage(v ? '1' : '0'); } catch (e) {}
     }
-
     function handler() {
       var el = document.fullscreenElement || document.webkitFullscreenElement || document.mozFullScreenElement || document.msFullscreenElement;
       post(!!el);
     }
-
     document.addEventListener('fullscreenchange', handler);
     document.addEventListener('webkitfullscreenchange', handler);
     document.addEventListener('mozfullscreenchange', handler);
     document.addEventListener('MSFullscreenChange', handler);
-
-    // Fire once in case page is already fullscreen.
     handler();
   } catch (e) {}
 })();
 """;
 
   Future<void> _handleFullscreenMessage(String message) async {
+    final state = context.read<AppState>();
+    if (!state.fullscreenLandscape) return;
     final m = message.trim().toLowerCase();
-    final isFs = m == '1' || m == 'true' || m == 'yes' || m == 'on';
-    if (isFs == _isFullscreen) return;
-    _isFullscreen = isFs;
-    await _applyFullscreenMode(isFs);
-  }
-
-  Future<void> _applyFullscreenMode(bool fullscreen) async {
-    // Mimic browser behavior: when video goes fullscreen, allow landscape and hide system UI.
-    // When exiting fullscreen, restore normal UI and portrait.
-    try {
-      if (fullscreen) {
-        await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-        await SystemChrome.setPreferredOrientations(
-          const [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight],
-        );
-      } else {
-        await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-        await SystemChrome.setPreferredOrientations(
-          const [DeviceOrientation.portraitUp],
-        );
-      }
-    } catch (_) {
-      // Best-effort: some platforms may ignore orientation constraints.
+    final nextFullscreen = m == '1' || m == 'true' || m == 'yes' || m == 'on';
+    if (nextFullscreen == _isFullscreen) return;
+    _isFullscreen = nextFullscreen;
+    if (nextFullscreen) {
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+      await SystemChrome.setPreferredOrientations(
+        const [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight],
+      );
+    } else {
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      await _applyOrientation(state.orientationLock);
     }
   }
 
+  Future<void> _applyOrientation(OrientationLock lock) async {
+    try {
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      switch (lock) {
+        case OrientationLock.followSystem:
+          await SystemChrome.setPreferredOrientations(const <DeviceOrientation>[]);
+          break;
+        case OrientationLock.portrait:
+          await SystemChrome.setPreferredOrientations(const [DeviceOrientation.portraitUp]);
+          break;
+        case OrientationLock.landscape:
+          await SystemChrome.setPreferredOrientations(
+            const [DeviceOrientation.landscapeLeft, DeviceOrientation.landscapeRight],
+          );
+          break;
+        case OrientationLock.autoRotate:
+          await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+          break;
+      }
+    } catch (_) {
+      // Best effort. Some platforms ignore orientation constraints.
+    }
+  }
 
   @override
   void dispose() {
     _connSub?.cancel();
-    // Make sure we never leave the app stuck in landscape if the page was fullscreen.
-    _applyFullscreenMode(false);
+    unawaited(SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge));
+    unawaited(SystemChrome.setPreferredOrientations(const <DeviceOrientation>[]));
     _progress.dispose();
     _currentUrl.dispose();
     _pageTitle.dispose();
@@ -210,8 +223,7 @@ class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _openSettings() async {
-    final c = _controller;
-
+    final controller = _controller;
     await showModalBottomSheet<void>(
       context: context,
       isScrollControlled: true,
@@ -219,12 +231,9 @@ class _HomePageState extends State<HomePage> {
       builder: (_) => SettingsSheet(
         currentUrl: _currentUrl.value,
         currentTitle: _pageTitle.value,
-        onOpenUrl: (url) async {
-          final normalized = UrlUtils.normalize(url);
-          await c?.loadRequest(Uri.parse(normalized));
-        },
+        onOpenUrl: _openUrl,
         onClearCache: () async {
-          await c?.clearCache();
+          await controller?.clearCache();
         },
         onClearCookies: () async {
           final cookieManager = WebViewCookieManager();
@@ -234,45 +243,73 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
-  Future<void> _promptGoTo() async {
-    final c = _controller;
-    if (c == null) return;
-
-    final ctrl = TextEditingController(text: _currentUrl.value);
-    final result = await showDialog<String>(
-      context: context,
-      builder: (context) => AlertDialog(
-        title: const Text('打开链接 / 搜索'),
-        content: TextField(
-          controller: ctrl,
-          autofocus: true,
-          keyboardType: TextInputType.url,
-          textInputAction: TextInputAction.go,
-          onSubmitted: (v) => Navigator.pop(context, v),
-          decoration: const InputDecoration(
-            hintText: '输入网址或关键词',
-            border: OutlineInputBorder(),
-          ),
-        ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(context), child: const Text('取消')),
-          FilledButton(onPressed: () => Navigator.pop(context, ctrl.text), child: const Text('打开')),
-        ],
-      ),
+  Future<void> _showOpenUrlSheet() async {
+    final state = context.read<AppState>();
+    final controller = TextEditingController(
+      text: _currentUrl.value.trim().isNotEmpty ? _currentUrl.value : state.homeUrl,
     );
-
+    final result = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (context) {
+        final bottom = MediaQuery.of(context).viewInsets.bottom;
+        return Padding(
+          padding: EdgeInsets.fromLTRB(16, 8, 16, bottom + 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              Text('打开网页', style: Theme.of(context).textTheme.titleLarge),
+              const SizedBox(height: 12),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                keyboardType: TextInputType.url,
+                textInputAction: TextInputAction.go,
+                onSubmitted: (v) => Navigator.pop(context, v),
+                decoration: const InputDecoration(
+                  labelText: '网址或搜索词',
+                  hintText: 'https://example.com',
+                  prefixIcon: Icon(Icons.travel_explore),
+                  border: OutlineInputBorder(),
+                ),
+              ),
+              const SizedBox(height: 12),
+              FilledButton.icon(
+                onPressed: () => Navigator.pop(context, controller.text),
+                icon: const Icon(Icons.open_in_browser),
+                label: const Text('打开'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    controller.dispose();
     if (result == null) return;
-    final url = UrlUtils.normalize(result);
-    await c.loadRequest(Uri.parse(url));
+    await _openUrl(result);
+  }
+
+  Future<void> _openUrl(String input) async {
+    final normalized = UrlUtils.normalize(input);
+    final state = context.read<AppState>();
+    await state.rememberOpenedUrl(normalized);
+    if (_controller == null) {
+      await _createController(state, initialUrl: normalized);
+      return;
+    }
+    _lastError = null;
+    await _controller!.loadRequest(Uri.parse(normalized));
   }
 
   Future<void> _share() async {
-    final url = _currentUrl.value;
+    final url = _currentUrl.value.trim().isNotEmpty ? _currentUrl.value : context.read<AppState>().launchUrl;
     await Share.share(url);
   }
 
   Future<void> _openExternal() async {
-    final uri = Uri.tryParse(_currentUrl.value);
+    final uri = Uri.tryParse(_currentUrl.value.trim().isNotEmpty ? _currentUrl.value : context.read<AppState>().launchUrl);
     if (uri == null) return;
     await launchUrl(uri, mode: LaunchMode.externalApplication);
   }
@@ -286,14 +323,13 @@ class _HomePageState extends State<HomePage> {
 
   Future<void> _toggleBookmark() async {
     final state = context.read<AppState>();
-    final url = _currentUrl.value;
-    final title = _pageTitle.value;
+    final url = _currentUrl.value.trim().isNotEmpty ? _currentUrl.value : state.launchUrl;
+    final title = _pageTitle.value.trim().isNotEmpty ? _pageTitle.value : state.appTitle;
     await state.toggleBookmark(url: url, title: title);
-
     if (!mounted) return;
-    final isNow = state.isBookmarked(UrlUtils.normalize(url));
+    final marked = state.isBookmarked(url);
     ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(content: Text(isNow ? '已加入书签' : '已移除书签')),
+      SnackBar(content: Text(marked ? '已加入书签' : '已移除书签')),
     );
   }
 
@@ -305,18 +341,19 @@ class _HomePageState extends State<HomePage> {
       final cookieManager = WebViewCookieManager();
       await cookieManager.clearCookies();
     }
+    _lastError = null;
     await c.reload();
   }
+
+  Future<void> _goHome() async => _openUrl(context.read<AppState>().homeUrl);
 
   Future<void> _handleBack() async {
     final c = _controller;
     if (c == null) return;
-
     if (await c.canGoBack()) {
       await c.goBack();
       return;
     }
-
     final now = DateTime.now();
     if (_lastBack == null || now.difference(_lastBack!) > const Duration(seconds: 2)) {
       _lastBack = now;
@@ -327,13 +364,14 @@ class _HomePageState extends State<HomePage> {
       }
       return;
     }
-
     if (mounted) Navigator.of(context).maybePop();
   }
 
   @override
   Widget build(BuildContext context) {
     final state = context.watch<AppState>();
+    if (!state.isConfigured) return const _SetupPage();
+
     final controller = _controller;
     final isDark = Theme.of(context).brightness == Brightness.dark;
 
@@ -345,44 +383,39 @@ class _HomePageState extends State<HomePage> {
       },
       child: Scaffold(
         appBar: AppBar(
-          title: GestureDetector(
-            onTap: _promptGoTo,
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(state.appTitle, maxLines: 1, overflow: TextOverflow.ellipsis),
-                ValueListenableBuilder<String>(
-                  valueListenable: _currentUrl,
-                  builder: (context, url, _) => Text(
-                    url,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: Theme.of(context).textTheme.bodySmall,
+          titleSpacing: 0,
+          title: InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: _showOpenUrlSheet,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(state.appTitle, maxLines: 1, overflow: TextOverflow.ellipsis),
+                  ValueListenableBuilder<String>(
+                    valueListenable: _currentUrl,
+                    builder: (context, url, _) => Text(
+                      url.trim().isEmpty ? state.launchUrl : url,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
           actions: [
             IconButton(
-              tooltip: '主页',
-              onPressed: controller == null
-                  ? null
-                  : () async {
-                      await controller.loadRequest(Uri.parse(state.homeUrl));
-                    },
-              icon: const Icon(Icons.home_outlined),
-            ),
-            IconButton(
-              tooltip: '刷新（长按清理后刷新）',
-              onPressed: controller == null ? null : () => _reload(),
-              onLongPress: controller == null ? null : () => _reload(hard: true),
-              icon: const Icon(Icons.refresh),
+              tooltip: '打开网址',
+              onPressed: _showOpenUrlSheet,
+              icon: const Icon(Icons.search),
             ),
             ValueListenableBuilder<String>(
               valueListenable: _currentUrl,
               builder: (context, url, _) {
-                final marked = state.isBookmarked(UrlUtils.normalize(url));
+                final marked = state.isBookmarked(url.trim().isEmpty ? state.launchUrl : url);
                 return IconButton(
                   tooltip: marked ? '移除书签' : '加入书签',
                   onPressed: controller == null ? null : _toggleBookmark,
@@ -390,41 +423,17 @@ class _HomePageState extends State<HomePage> {
                 );
               },
             ),
-            PopupMenuButton<String>(
-              tooltip: '更多',
-              onSelected: (v) async {
-                switch (v) {
-                  case 'share':
-                    await _share();
-                    break;
-                  case 'external':
-                    await _openExternal();
-                    break;
-                  case 'copy':
-                    await _copyLink();
-                    break;
-                  case 'settings':
-                    await _openSettings();
-                    break;
-                }
-              },
-              itemBuilder: (context) => const [
-                PopupMenuItem(value: 'share', child: ListTile(leading: Icon(Icons.share), title: Text('分享'))),
-                PopupMenuItem(value: 'copy', child: ListTile(leading: Icon(Icons.copy), title: Text('复制链接'))),
-                PopupMenuItem(value: 'external', child: ListTile(leading: Icon(Icons.open_in_new), title: Text('外部打开'))),
-                PopupMenuDivider(),
-                PopupMenuItem(value: 'settings', child: ListTile(leading: Icon(Icons.settings), title: Text('设置'))),
-              ],
+            IconButton(
+              tooltip: '设置',
+              onPressed: _openSettings,
+              icon: const Icon(Icons.tune),
             ),
           ],
           bottom: PreferredSize(
             preferredSize: const Size.fromHeight(2),
             child: ValueListenableBuilder<int>(
               valueListenable: _progress,
-              builder: (context, p, _) {
-                if (p >= 100) return const SizedBox(height: 2);
-                return LinearProgressIndicator(value: p / 100.0);
-              },
+              builder: (context, p, _) => p >= 100 ? const SizedBox(height: 2) : LinearProgressIndicator(value: p / 100.0),
             ),
           ),
         ),
@@ -434,8 +443,6 @@ class _HomePageState extends State<HomePage> {
               const Center(child: CircularProgressIndicator())
             else
               WebViewWidget(controller: controller),
-
-            // Falling effect overlay
             if (state.effect != EffectType.none)
               IgnorePointer(
                 child: LayoutBuilder(
@@ -447,84 +454,268 @@ class _HomePageState extends State<HomePage> {
                   ),
                 ),
               ),
-
-            // Offline banner
-            if (_isOffline)
-              Positioned(
-                left: 0,
-                right: 0,
-                top: 0,
-                child: Material(
-                  color: Theme.of(context).colorScheme.errorContainer,
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                    child: Row(
-                      children: [
-                        const Icon(Icons.wifi_off, size: 18),
-                        const SizedBox(width: 8),
-                        const Expanded(child: Text('当前离线：请检查网络连接')),
-                        TextButton(
-                          onPressed: () => _reload(),
-                          child: const Text('重试'),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-
-            // Error overlay
-            if (_lastError != null)
-              Positioned.fill(
-                child: Container(
-                  // Avoid deprecated withOpacity (precision loss). Use alpha channel explicitly.
-                  color: Theme.of(context).colorScheme.surface.withAlpha(235),
-                  child: Center(
-                    child: Padding(
-                      padding: const EdgeInsets.all(20),
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          const Icon(Icons.error_outline, size: 48),
-                          const SizedBox(height: 12),
-                          Text(
-                            '加载失败',
-                            style: Theme.of(context).textTheme.titleLarge,
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            _lastError!,
-                            textAlign: TextAlign.center,
-                            style: Theme.of(context).textTheme.bodyMedium,
-                          ),
-                          const SizedBox(height: 16),
-                          Wrap(
-                            spacing: 8,
-                            children: [
-                              OutlinedButton.icon(
-                                onPressed: () => setState(() => _lastError = null),
-                                icon: const Icon(Icons.close),
-                                label: const Text('关闭'),
-                              ),
-                              FilledButton.icon(
-                                onPressed: () async {
-                                  setState(() => _lastError = null);
-                                  await _reload();
-                                },
-                                icon: const Icon(Icons.refresh),
-                                label: const Text('重试'),
-                              ),
-                            ],
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                ),
-              ),
+            if (_isOffline) _OfflineBanner(onRetry: () => _reload()),
+            if (_lastError != null) _ErrorOverlay(error: _lastError!, onClose: () => setState(() => _lastError = null), onRetry: () => _reload()),
           ],
         ),
-        // FAB removed: open/search is available via tapping the title bar or Settings sheet.
+        bottomNavigationBar: NavigationBar(
+          selectedIndex: 0,
+          onDestinationSelected: (index) async {
+            switch (index) {
+              case 0:
+                await _handleBack();
+                break;
+              case 1:
+                if (await (_controller?.canGoForward() ?? Future.value(false))) await _controller?.goForward();
+                break;
+              case 2:
+                await _goHome();
+                break;
+              case 3:
+                await _reload();
+                break;
+              case 4:
+                await _openSettings();
+                break;
+            }
+          },
+          destinations: const [
+            NavigationDestination(icon: Icon(Icons.arrow_back), label: '后退'),
+            NavigationDestination(icon: Icon(Icons.arrow_forward), label: '前进'),
+            NavigationDestination(icon: Icon(Icons.home_outlined), label: '主页'),
+            NavigationDestination(icon: Icon(Icons.refresh), label: '刷新'),
+            NavigationDestination(icon: Icon(Icons.menu), label: '更多'),
+          ],
+        ),
+        floatingActionButton: FloatingActionButton.small(
+          tooltip: '分享 / 复制 / 外部打开',
+          onPressed: () => _showQuickActions(context),
+          child: const Icon(Icons.ios_share),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _showQuickActions(BuildContext context) async {
+    await showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(leading: const Icon(Icons.share), title: const Text('分享'), onTap: () async { Navigator.pop(context); await _share(); }),
+            ListTile(leading: const Icon(Icons.copy), title: const Text('复制链接'), onTap: () async { Navigator.pop(context); await _copyLink(); }),
+            ListTile(leading: const Icon(Icons.open_in_new), title: const Text('外部浏览器打开'), onTap: () async { Navigator.pop(context); await _openExternal(); }),
+            ListTile(leading: const Icon(Icons.delete_sweep), title: const Text('清理缓存后刷新'), onTap: () async { Navigator.pop(context); await _reload(hard: true); }),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _SetupPage extends StatefulWidget {
+  const _SetupPage();
+
+  @override
+  State<_SetupPage> createState() => _SetupPageState();
+}
+
+class _SetupPageState extends State<_SetupPage> {
+  final _titleCtrl = TextEditingController(text: 'LinkWeb');
+  final _urlCtrl = TextEditingController();
+  OrientationLock _orientation = OrientationLock.followSystem;
+  bool _desktopMode = false;
+  bool _javascriptEnabled = true;
+  bool _resumeLastUrl = true;
+  bool _saving = false;
+
+  @override
+  void dispose() {
+    _titleCtrl.dispose();
+    _urlCtrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    setState(() => _saving = true);
+    try {
+      await context.read<AppState>().saveInitialSetup(
+            appTitle: _titleCtrl.text,
+            homeUrl: _urlCtrl.text,
+            orientationLock: _orientation,
+            desktopMode: _desktopMode,
+            javascriptEnabled: _javascriptEnabled,
+            resumeLastUrl: _resumeLastUrl,
+          );
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(e.toString().replaceFirst('Invalid argument(s): ', ''))));
+      }
+    } finally {
+      if (mounted) setState(() => _saving = false);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        child: ListView(
+          padding: const EdgeInsets.all(20),
+          children: [
+            const SizedBox(height: 20),
+            Icon(Icons.web_asset, size: 56, color: Theme.of(context).colorScheme.primary),
+            const SizedBox(height: 16),
+            Text('输入网页，直接变成 App', style: Theme.of(context).textTheme.headlineSmall, textAlign: TextAlign.center),
+            const SizedBox(height: 8),
+            Text(
+              '这里只保存真正会影响运行的配置。保存后刷新、重启都从已保存的网址和方向设置恢复。',
+              style: Theme.of(context).textTheme.bodyMedium,
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 24),
+            TextField(
+              controller: _titleCtrl,
+              textInputAction: TextInputAction.next,
+              decoration: const InputDecoration(
+                labelText: 'App 名称',
+                prefixIcon: Icon(Icons.badge_outlined),
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _urlCtrl,
+              autofocus: true,
+              keyboardType: TextInputType.url,
+              textInputAction: TextInputAction.done,
+              onSubmitted: (_) => _save(),
+              decoration: const InputDecoration(
+                labelText: '要打开的网页',
+                hintText: 'https://example.com',
+                prefixIcon: Icon(Icons.link),
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 16),
+            Text('方向锁定', style: Theme.of(context).textTheme.titleSmall),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              children: OrientationLock.values
+                  .map(
+                    (lock) => ChoiceChip(
+                      label: Text(lock.label),
+                      selected: _orientation == lock,
+                      onSelected: (_) => setState(() => _orientation = lock),
+                    ),
+                  )
+                  .toList(),
+            ),
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(_orientation.description, style: Theme.of(context).textTheme.bodySmall),
+            ),
+            const SizedBox(height: 12),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('重启后继续上次页面'),
+              value: _resumeLastUrl,
+              onChanged: (v) => setState(() => _resumeLastUrl = v),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('桌面模式'),
+              subtitle: const Text('给网页使用桌面浏览器 UA'),
+              value: _desktopMode,
+              onChanged: (v) => setState(() => _desktopMode = v),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('启用 JavaScript'),
+              value: _javascriptEnabled,
+              onChanged: (v) => setState(() => _javascriptEnabled = v),
+            ),
+            const SizedBox(height: 16),
+            FilledButton.icon(
+              onPressed: _saving ? null : _save,
+              icon: _saving ? const SizedBox(width: 18, height: 18, child: CircularProgressIndicator(strokeWidth: 2)) : const Icon(Icons.rocket_launch),
+              label: Text(_saving ? '保存中...' : '保存并进入 App'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _OfflineBanner extends StatelessWidget {
+  final VoidCallback onRetry;
+
+  const _OfflineBanner({required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned(
+      left: 0,
+      right: 0,
+      top: 0,
+      child: Material(
+        color: Theme.of(context).colorScheme.errorContainer,
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+          child: Row(
+            children: [
+              const Icon(Icons.wifi_off, size: 18),
+              const SizedBox(width: 8),
+              const Expanded(child: Text('当前离线：请检查网络连接')),
+              TextButton(onPressed: onRetry, child: const Text('重试')),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _ErrorOverlay extends StatelessWidget {
+  final String error;
+  final VoidCallback onClose;
+  final VoidCallback onRetry;
+
+  const _ErrorOverlay({required this.error, required this.onClose, required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    return Positioned.fill(
+      child: Container(
+        color: Theme.of(context).colorScheme.surface.withAlpha(235),
+        child: Center(
+          child: Padding(
+            padding: const EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.error_outline, size: 48),
+                const SizedBox(height: 12),
+                Text('加载失败', style: Theme.of(context).textTheme.titleLarge),
+                const SizedBox(height: 8),
+                Text(error, textAlign: TextAlign.center, style: Theme.of(context).textTheme.bodyMedium),
+                const SizedBox(height: 16),
+                Wrap(
+                  spacing: 8,
+                  children: [
+                    OutlinedButton.icon(onPressed: onClose, icon: const Icon(Icons.close), label: const Text('关闭')),
+                    FilledButton.icon(onPressed: onRetry, icon: const Icon(Icons.refresh), label: const Text('重试')),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }

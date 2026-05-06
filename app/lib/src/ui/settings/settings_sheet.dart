@@ -29,6 +29,7 @@ class _SettingsSheetState extends State<SettingsSheet> {
   late final TextEditingController _titleCtrl;
   late final TextEditingController _homeCtrl;
   PackageInfo? _pkg;
+  bool _savingBasics = false;
 
   @override
   void initState() {
@@ -48,14 +49,27 @@ class _SettingsSheetState extends State<SettingsSheet> {
     super.dispose();
   }
 
-  Future<void> _saveBasics() async {
-    final state = context.read<AppState>();
-    await state.setAppTitle(_titleCtrl.text);
-    await state.setHomeUrl(_homeCtrl.text);
-    if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('已保存')),
-      );
+  Future<void> _saveBasics({bool openHome = false}) async {
+    setState(() => _savingBasics = true);
+    try {
+      if (_homeCtrl.text.trim().isEmpty) {
+        throw ArgumentError('请输入网页地址');
+      }
+      final state = context.read<AppState>();
+      await state.setAppTitle(_titleCtrl.text);
+      await state.setHomeUrl(_homeCtrl.text);
+      if (openHome) await widget.onOpenUrl(state.homeUrl);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已保存')));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(e.toString().replaceFirst('Invalid argument(s): ', ''))),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _savingBasics = false);
     }
   }
 
@@ -71,26 +85,23 @@ class _SettingsSheetState extends State<SettingsSheet> {
         title: Text(title),
         content: Text(content),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: Text(confirmText),
-          ),
+          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('取消')),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: Text(confirmText)),
         ],
       ),
     );
-
-    if (ok == true) {
-      await run();
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('已完成')),
-        );
-      }
+    if (ok != true) return;
+    await run();
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('已完成')));
     }
+  }
+
+  Future<void> _setCurrentAsHome() async {
+    final current = widget.currentUrl.trim();
+    if (current.isEmpty) return;
+    _homeCtrl.text = current;
+    await _saveBasics();
   }
 
   @override
@@ -98,215 +109,245 @@ class _SettingsSheetState extends State<SettingsSheet> {
     final state = context.watch<AppState>();
     final bottom = MediaQuery.of(context).viewInsets.bottom;
 
-    return SingleChildScrollView(
-      padding: EdgeInsets.only(left: 16, right: 16, bottom: bottom + 16, top: 8),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
+    return SafeArea(
+      child: ListView(
+        padding: EdgeInsets.fromLTRB(16, 8, 16, bottom + 16),
         children: [
-          const SizedBox(height: 8),
-
-          // App basics
-          Text('基础设置', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 12),
-
-          const Text('应用标题', style: TextStyle(fontWeight: FontWeight.w600)),
-          const SizedBox(height: 8),
-          TextField(
-            controller: _titleCtrl,
-            decoration: const InputDecoration(
-              border: OutlineInputBorder(),
-              prefixIcon: Icon(Icons.title),
-              hintText: '例如：我的网页 App',
+          Row(
+            children: [
+              Expanded(child: Text('设置', style: Theme.of(context).textTheme.titleLarge)),
+              IconButton(tooltip: '关闭', onPressed: () => Navigator.pop(context), icon: const Icon(Icons.close)),
+            ],
+          ),
+          if (widget.currentUrl.trim().isNotEmpty)
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.public),
+              title: Text(
+                widget.currentTitle.trim().isEmpty ? '当前页面' : widget.currentTitle.trim(),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              subtitle: Text(widget.currentUrl, maxLines: 1, overflow: TextOverflow.ellipsis),
             ),
-          ),
-          const SizedBox(height: 12),
-
-          const Text('主页网址（Home URL）', style: TextStyle(fontWeight: FontWeight.w600)),
           const SizedBox(height: 8),
-          TextField(
-            controller: _homeCtrl,
-            keyboardType: TextInputType.url,
-            decoration: const InputDecoration(
-              border: OutlineInputBorder(),
-              prefixIcon: Icon(Icons.home),
-              hintText: '例如：https://news.ycombinator.com',
-            ),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            '💡 支持直接输入关键词当搜索；不带 http/https 会自动补上 https://',
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: Theme.of(context).colorScheme.secondary,
+          _SectionCard(
+            title: '网页 App',
+            subtitle: '这些配置会持久保存，重启和刷新不会回到旧值。',
+            children: [
+              TextField(
+                controller: _titleCtrl,
+                textInputAction: TextInputAction.next,
+                decoration: const InputDecoration(
+                  labelText: 'App 名称',
+                  prefixIcon: Icon(Icons.badge_outlined),
+                  border: OutlineInputBorder(),
                 ),
-          ),
-          const SizedBox(height: 12),
-
-          FilledButton.icon(
-            onPressed: _saveBasics,
-            icon: const Icon(Icons.save),
-            label: const Text('保存'),
-          ),
-
-          const Divider(height: 32),
-
-          // Web settings
-          Text('浏览设置', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 12),
-
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('桌面模式（Desktop UA）'),
-            subtitle: const Text('有些网站在桌面模式下布局更完整；切换后需重新加载页面生效'),
-            value: state.desktopMode,
-            onChanged: (v) => state.setDesktopMode(v),
-          ),
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('启用 JavaScript'),
-            subtitle: const Text('关闭可提升安全性，但可能导致部分站点不可用'),
-            value: state.javascriptEnabled,
-            onChanged: (v) => state.setJavascriptEnabled(v),
-          ),
-
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              OutlinedButton.icon(
-                onPressed: () => widget.onOpenUrl(UrlUtils.normalize(widget.currentUrl)),
-                icon: const Icon(Icons.refresh),
-                label: const Text('重新加载当前页'),
               ),
-              OutlinedButton.icon(
-                onPressed: () => widget.onOpenUrl(state.homeUrl),
-                icon: const Icon(Icons.home),
-                label: const Text('回到主页'),
-              ),
-            ],
-          ),
-
-          const Divider(height: 32),
-
-          // Theme
-          Text('外观', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 12),
-
-          const Text('主题', style: TextStyle(fontWeight: FontWeight.w600)),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            children: [
-              ChoiceChip(
-                label: const Text('跟随系统'),
-                avatar: const Icon(Icons.brightness_auto, size: 18),
-                selected: state.themeMode == ThemeMode.system,
-                onSelected: (_) => state.setThemeMode(ThemeMode.system),
-              ),
-              ChoiceChip(
-                label: const Text('浅色'),
-                avatar: const Icon(Icons.light_mode, size: 18),
-                selected: state.themeMode == ThemeMode.light,
-                onSelected: (_) => state.setThemeMode(ThemeMode.light),
-              ),
-              ChoiceChip(
-                label: const Text('深色'),
-                avatar: const Icon(Icons.dark_mode, size: 18),
-                selected: state.themeMode == ThemeMode.dark,
-                onSelected: (_) => state.setThemeMode(ThemeMode.dark),
-              ),
-            ],
-          ),
-          const SizedBox(height: 16),
-
-          const Text('飘落特效', style: TextStyle(fontWeight: FontWeight.w600)),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              ChoiceChip(
-                label: const Text('无'),
-                avatar: const Icon(Icons.block, size: 18),
-                selected: state.effect == EffectType.none,
-                onSelected: (_) => state.setEffect(EffectType.none),
-              ),
-              ChoiceChip(
-                label: const Text('雪花 ❄️'),
-                selected: state.effect == EffectType.snow,
-                onSelected: (_) => state.setEffect(EffectType.snow),
-              ),
-              ChoiceChip(
-                label: const Text('樱花 🌸'),
-                selected: state.effect == EffectType.sakura,
-                onSelected: (_) => state.setEffect(EffectType.sakura),
-              ),
-            ],
-          ),
-
-          const Divider(height: 32),
-
-          // Data
-          Text('数据', style: Theme.of(context).textTheme.titleMedium),
-          const SizedBox(height: 12),
-
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.bookmark_border),
-            title: const Text('书签'),
-            subtitle: Text('共 ${state.bookmarks.length} 个'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => _showBookmarks(context),
-          ),
-          ListTile(
-            contentPadding: EdgeInsets.zero,
-            leading: const Icon(Icons.history),
-            title: const Text('历史记录'),
-            subtitle: Text('共 ${state.urlHistory.length} 条'),
-            trailing: const Icon(Icons.chevron_right),
-            onTap: () => _showHistory(context),
-          ),
-
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              OutlinedButton.icon(
-                onPressed: () => _confirmAndRun(
-                  title: '清除缓存',
-                  content: '将清除 WebView 缓存并建议重新加载页面。',
-                  run: widget.onClearCache,
+              const SizedBox(height: 12),
+              TextField(
+                controller: _homeCtrl,
+                keyboardType: TextInputType.url,
+                textInputAction: TextInputAction.done,
+                onSubmitted: (_) => _saveBasics(openHome: true),
+                decoration: const InputDecoration(
+                  labelText: '主页网址',
+                  hintText: 'https://example.com',
+                  prefixIcon: Icon(Icons.home_outlined),
+                  border: OutlineInputBorder(),
                 ),
-                icon: const Icon(Icons.layers_clear),
-                label: const Text('清除缓存'),
               ),
-              OutlinedButton.icon(
-                onPressed: () => _confirmAndRun(
-                  title: '清除 Cookies',
-                  content: '将清除 WebView Cookies（可能会导致你退出登录）。',
-                  run: widget.onClearCookies,
-                ),
-                icon: const Icon(Icons.cookie_outlined),
-                label: const Text('清除 Cookies'),
+              const SizedBox(height: 12),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  FilledButton.icon(
+                    onPressed: _savingBasics ? null : () => _saveBasics(),
+                    icon: const Icon(Icons.save),
+                    label: Text(_savingBasics ? '保存中...' : '保存'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: _savingBasics ? null : () => _saveBasics(openHome: true),
+                    icon: const Icon(Icons.open_in_browser),
+                    label: const Text('保存并打开主页'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: widget.currentUrl.trim().isEmpty ? null : _setCurrentAsHome,
+                    icon: const Icon(Icons.my_location),
+                    label: const Text('当前页设为主页'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('启动时继续上次页面'),
+                subtitle: const Text('关闭后每次启动都打开主页。'),
+                value: state.resumeLastUrl,
+                onChanged: state.setResumeLastUrl,
               ),
             ],
           ),
-
-          const Divider(height: 32),
-
-          // About
-          OutlinedButton.icon(
-            onPressed: () => _showAbout(context),
-            icon: const Icon(Icons.info_outline),
-            label: const Text('关于'),
+          _SectionCard(
+            title: '方向锁定',
+            subtitle: '方向由 App 状态统一控制，退出全屏后会恢复这里的设置。',
+            children: [
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: OrientationLock.values
+                    .map(
+                      (lock) => ChoiceChip(
+                        label: Text(lock.label),
+                        selected: state.orientationLock == lock,
+                        onSelected: (_) => state.setOrientationLock(lock),
+                      ),
+                    )
+                    .toList(),
+              ),
+              const SizedBox(height: 8),
+              Text(state.orientationLock.description, style: Theme.of(context).textTheme.bodySmall),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('网页全屏时临时横屏'),
+                subtitle: const Text('视频全屏时横屏，退出全屏后恢复上方方向锁定。'),
+                value: state.fullscreenLandscape,
+                onChanged: state.setFullscreenLandscape,
+              ),
+            ],
           ),
+          _SectionCard(
+            title: '浏览能力',
+            children: [
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('桌面模式（Desktop UA）'),
+                subtitle: const Text('切换后会重建 WebView 并继续当前页面。'),
+                value: state.desktopMode,
+                onChanged: state.setDesktopMode,
+              ),
+              SwitchListTile(
+                contentPadding: EdgeInsets.zero,
+                title: const Text('启用 JavaScript'),
+                subtitle: const Text('关闭后很多网站无法正常运行。'),
+                value: state.javascriptEnabled,
+                onChanged: state.setJavascriptEnabled,
+              ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: () => widget.onOpenUrl(UrlUtils.normalize(widget.currentUrl.isEmpty ? state.launchUrl : widget.currentUrl)),
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('重新加载当前页'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () => widget.onOpenUrl(state.homeUrl),
+                    icon: const Icon(Icons.home),
+                    label: const Text('回到主页'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          _SectionCard(
+            title: '外观',
+            children: [
+              const Text('主题', style: TextStyle(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  ChoiceChip(
+                    label: const Text('跟随系统'),
+                    avatar: const Icon(Icons.brightness_auto, size: 18),
+                    selected: state.themeMode == ThemeMode.system,
+                    onSelected: (_) => state.setThemeMode(ThemeMode.system),
+                  ),
+                  ChoiceChip(
+                    label: const Text('浅色'),
+                    avatar: const Icon(Icons.light_mode, size: 18),
+                    selected: state.themeMode == ThemeMode.light,
+                    onSelected: (_) => state.setThemeMode(ThemeMode.light),
+                  ),
+                  ChoiceChip(
+                    label: const Text('深色'),
+                    avatar: const Icon(Icons.dark_mode, size: 18),
+                    selected: state.themeMode == ThemeMode.dark,
+                    onSelected: (_) => state.setThemeMode(ThemeMode.dark),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              const Text('飘落特效', style: TextStyle(fontWeight: FontWeight.w600)),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  ChoiceChip(label: const Text('无'), selected: state.effect == EffectType.none, onSelected: (_) => state.setEffect(EffectType.none)),
+                  ChoiceChip(label: const Text('雪花'), selected: state.effect == EffectType.snow, onSelected: (_) => state.setEffect(EffectType.snow)),
+                  ChoiceChip(label: const Text('樱花'), selected: state.effect == EffectType.sakura, onSelected: (_) => state.setEffect(EffectType.sakura)),
+                ],
+              ),
+            ],
+          ),
+          _SectionCard(
+            title: '书签和历史',
+            children: [
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.bookmark_border),
+                title: const Text('书签'),
+                subtitle: Text('共 ${state.bookmarks.length} 个'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => _showBookmarks(context),
+              ),
+              ListTile(
+                contentPadding: EdgeInsets.zero,
+                leading: const Icon(Icons.history),
+                title: const Text('历史记录'),
+                subtitle: Text('共 ${state.urlHistory.length} 条'),
+                trailing: const Icon(Icons.chevron_right),
+                onTap: () => _showHistory(context),
+              ),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  OutlinedButton.icon(
+                    onPressed: () => _confirmAndRun(
+                      title: '清除缓存',
+                      content: '将清除 WebView 缓存。不会删除你保存的主页、方向、书签和历史。',
+                      run: widget.onClearCache,
+                    ),
+                    icon: const Icon(Icons.layers_clear),
+                    label: const Text('清除缓存'),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () => _confirmAndRun(
+                      title: '清除 Cookies',
+                      content: '会退出网页登录状态，但不会影响 App 设置。',
+                      run: widget.onClearCookies,
+                    ),
+                    icon: const Icon(Icons.cookie_outlined),
+                    label: const Text('清除 Cookies'),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          OutlinedButton.icon(onPressed: () => _showAbout(context), icon: const Icon(Icons.info_outline), label: const Text('关于')),
         ],
       ),
     );
   }
 
-  Future<void> _showAbout(BuildContext context) async {
+  void _showAbout(BuildContext context) {
     final p = _pkg;
     final v = p == null ? '' : '${p.version}+${p.buildNumber}';
     showAboutDialog(
@@ -315,15 +356,14 @@ class _SettingsSheetState extends State<SettingsSheet> {
       applicationVersion: v,
       applicationIcon: const Icon(Icons.web, size: 48),
       children: const [
-        Text('轻量级网页容器（WebView）应用：把任何网址变成独立 App。'),
+        Text('LinkWeb 是一个网页 App 容器：输入一个网址，就可以像独立 App 一样运行。'),
         SizedBox(height: 8),
-        Text('功能：书签、历史、离线提醒、桌面模式、JavaScript 开关、主题/特效、清理缓存与 Cookies。'),
+        Text('设置、方向、最近页面、书签和历史都持久保存，不依赖临时输入框状态。'),
       ],
     );
   }
 
   Future<void> _showBookmarks(BuildContext context) async {
-    final state = context.read<AppState>();
     await showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
@@ -331,22 +371,29 @@ class _SettingsSheetState extends State<SettingsSheet> {
       builder: (_) => DraggableScrollableSheet(
         expand: false,
         initialChildSize: 0.8,
-        minChildSize: 0.5,
+        minChildSize: 0.45,
         maxChildSize: 0.95,
         builder: (context, scroll) {
-          final items = context.watch<AppState>().bookmarks;
+          final state = context.watch<AppState>();
+          final items = state.bookmarks;
           return ListView(
             controller: scroll,
             children: [
-              const ListTile(
-                title: Text('书签', style: TextStyle(fontWeight: FontWeight.w700)),
-                subtitle: Text('点击打开；长按删除。'),
+              ListTile(
+                title: const Text('书签', style: TextStyle(fontWeight: FontWeight.w700)),
+                subtitle: const Text('点击打开，长按删除。'),
+                trailing: items.isEmpty
+                    ? null
+                    : TextButton(
+                        onPressed: () => _confirmAndRun(
+                          title: '清空书签',
+                          content: '确定清空所有书签？',
+                          run: state.clearBookmarks,
+                        ),
+                        child: const Text('清空'),
+                      ),
               ),
-              if (items.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.all(24),
-                  child: Center(child: Text('暂无书签')), 
-                ),
+              if (items.isEmpty) const Padding(padding: EdgeInsets.all(24), child: Center(child: Text('暂无书签'))),
               ...items.map(
                 (b) => ListTile(
                   leading: const Icon(Icons.bookmark),
@@ -354,33 +401,12 @@ class _SettingsSheetState extends State<SettingsSheet> {
                   subtitle: Text(b.url, maxLines: 1, overflow: TextOverflow.ellipsis),
                   onTap: () async {
                     Navigator.pop(context);
+                    Navigator.pop(this.context);
                     await widget.onOpenUrl(b.url);
-                    if (mounted) Navigator.pop(this.context);
                   },
-                  onLongPress: () async {
-                    await _confirmAndRun(
-                      title: '删除书签',
-                      content: '确定删除这个书签吗？',
-                      run: () => state.removeBookmark(b.url),
-                      confirmText: '删除',
-                    );
-                  },
+                  onLongPress: () => state.removeBookmark(b.url),
                 ),
               ),
-              if (items.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-                  child: OutlinedButton.icon(
-                    onPressed: () => _confirmAndRun(
-                      title: '清空书签',
-                      content: '确定清空所有书签吗？',
-                      run: state.clearBookmarks,
-                      confirmText: '清空',
-                    ),
-                    icon: const Icon(Icons.delete_outline),
-                    label: const Text('清空全部'),
-                  ),
-                ),
             ],
           );
         },
@@ -389,7 +415,6 @@ class _SettingsSheetState extends State<SettingsSheet> {
   }
 
   Future<void> _showHistory(BuildContext context) async {
-    final state = context.read<AppState>();
     await showModalBottomSheet<void>(
       context: context,
       showDragHandle: true,
@@ -397,50 +422,73 @@ class _SettingsSheetState extends State<SettingsSheet> {
       builder: (_) => DraggableScrollableSheet(
         expand: false,
         initialChildSize: 0.8,
-        minChildSize: 0.5,
+        minChildSize: 0.45,
         maxChildSize: 0.95,
         builder: (context, scroll) {
-          final items = context.watch<AppState>().urlHistory;
+          final state = context.watch<AppState>();
+          final items = state.urlHistory;
           return ListView(
             controller: scroll,
             children: [
-              const ListTile(
-                title: Text('历史记录', style: TextStyle(fontWeight: FontWeight.w700)),
-                subtitle: Text('点击打开；最多保留 25 条。'),
+              ListTile(
+                title: const Text('历史记录', style: TextStyle(fontWeight: FontWeight.w700)),
+                subtitle: const Text('点击打开。'),
+                trailing: items.isEmpty
+                    ? null
+                    : TextButton(
+                        onPressed: () => _confirmAndRun(
+                          title: '清空历史记录',
+                          content: '确定清空历史记录？',
+                          run: state.clearHistory,
+                        ),
+                        child: const Text('清空'),
+                      ),
               ),
-              if (items.isEmpty)
-                const Padding(
-                  padding: EdgeInsets.all(24),
-                  child: Center(child: Text('暂无历史记录')),
-                ),
+              if (items.isEmpty) const Padding(padding: EdgeInsets.all(24), child: Center(child: Text('暂无历史'))),
               ...items.map(
                 (url) => ListTile(
                   leading: const Icon(Icons.history),
                   title: Text(url, maxLines: 1, overflow: TextOverflow.ellipsis),
                   onTap: () async {
                     Navigator.pop(context);
+                    Navigator.pop(this.context);
                     await widget.onOpenUrl(url);
-                    if (mounted) Navigator.pop(this.context);
                   },
                 ),
               ),
-              if (items.isNotEmpty)
-                Padding(
-                  padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
-                  child: OutlinedButton.icon(
-                    onPressed: () => _confirmAndRun(
-                      title: '清空历史记录',
-                      content: '确定清空历史记录吗？',
-                      run: state.clearHistory,
-                      confirmText: '清空',
-                    ),
-                    icon: const Icon(Icons.delete_outline),
-                    label: const Text('清空全部'),
-                  ),
-                ),
             ],
           );
         },
+      ),
+    );
+  }
+}
+
+class _SectionCard extends StatelessWidget {
+  final String title;
+  final String? subtitle;
+  final List<Widget> children;
+
+  const _SectionCard({required this.title, this.subtitle, required this.children});
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      margin: const EdgeInsets.only(bottom: 14),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(title, style: Theme.of(context).textTheme.titleMedium),
+            if (subtitle != null) ...[
+              const SizedBox(height: 4),
+              Text(subtitle!, style: Theme.of(context).textTheme.bodySmall),
+            ],
+            const SizedBox(height: 12),
+            ...children,
+          ],
+        ),
       ),
     );
   }
