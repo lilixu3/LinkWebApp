@@ -30,6 +30,7 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+      actions: read
 
     steps:
       - name: Checkout
@@ -55,7 +56,12 @@ jobs:
           fi
 
           if [[ -z "${RAW_VERSION_CODE:-}" || "${RAW_VERSION_CODE}" == "auto" ]]; then
-            VERSION_CODE=$((GITHUB_RUN_NUMBER + VERSION_CODE_OFFSET))
+            LATEST_SUCCESS_RUN_NUMBER=$(gh run list --workflow android-apk.yml --branch "$GITHUB_REF_NAME" --status success --limit 1 --json number --jq '.[0].number' 2>/dev/null || true)
+            if [[ "$LATEST_SUCCESS_RUN_NUMBER" =~ ^[0-9]+$ ]]; then
+              VERSION_CODE=$((LATEST_SUCCESS_RUN_NUMBER + 1 + VERSION_CODE_OFFSET))
+            else
+              VERSION_CODE=$((GITHUB_RUN_NUMBER + VERSION_CODE_OFFSET))
+            fi
           else
             VERSION_CODE="$RAW_VERSION_CODE"
           fi
@@ -248,6 +254,11 @@ jobs:
               r'\1\n            signingConfig = signingConfigs.getByName("release")',
               content
           )
+          content = re.sub(
+              r'signingConfig\s*=\s*signingConfigs\.getByName\("debug"\)',
+              'signingConfig = signingConfigs.getByName("release")',
+              content
+          )
 
           with open(gradle_file, 'w') as f:
               f.write(content)
@@ -286,6 +297,7 @@ jobs:
           '''
           content = re.sub(r'(\s+buildTypes\s*\{)', signing_config + r'\1', content)
           content = re.sub(r'(release\s*\{)', r'\1\n            signingConfig signingConfigs.release', content)
+          content = re.sub(r'signingConfig\s+signingConfigs\.debug', 'signingConfig signingConfigs.release', content)
           with open(gradle_file, 'w') as f:
               f.write(content)
           PYTHON_SCRIPT
@@ -334,7 +346,7 @@ jobs:
           fi
 
           "$APKSIGNER" verify --print-certs "$APK_FILE" | tee /tmp/apk-signature.txt
-          ACTUAL_SIGNER_SHA256=$(grep 'Signer #1 certificate SHA-256 digest:' /tmp/apk-signature.txt | head -n1 | sed 's/.*: //')
+          ACTUAL_SIGNER_SHA256=$(grep -E '(Signer #1|V[0-9]+ Signer): certificate SHA-256 digest:' /tmp/apk-signature.txt | head -n1 | sed 's/.*digest: //')
           normalize_hash() { tr '[:upper:]' '[:lower:]' | tr -d ':'; }
           ACTUAL_NORMALIZED=$(printf '%s' "$ACTUAL_SIGNER_SHA256" | normalize_hash)
           EXPECTED_NORMALIZED=$(printf '%s' "$EXPECTED_SIGNER_SHA256" | normalize_hash)
