@@ -4,16 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       version_code:
-        description: 'Version code (integer)'
-        required: true
-        default: '1'
+        description: 'Version code (integer). Leave auto to use workflow run number.'
+        required: false
+        default: 'auto'
       version_name:
-        description: 'Version name (e.g., 1.0.0)'
-        required: true
-        default: '1.0.0'
+        description: 'Version name (e.g., 1.1.1). Leave auto to increment latest release patch version.'
+        required: false
+        default: 'auto'
       app_name:
         description: 'Application name'
-        required: true
+        required: false
         default: 'LinkWeb'
       upload_to_release:
         description: 'Upload to GitHub Release'
@@ -35,6 +35,66 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Resolve build metadata
+        id: meta
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RAW_VERSION_CODE: ${{ github.event.inputs.version_code }}
+          RAW_VERSION_NAME: ${{ github.event.inputs.version_name }}
+          RAW_APP_NAME: ${{ github.event.inputs.app_name }}
+          VERSION_CODE_OFFSET: ${{ vars.ANDROID_VERSION_CODE_OFFSET }}
+          VERSION_NAME_PREFIX: ${{ vars.ANDROID_VERSION_NAME_PREFIX }}
+          DEFAULT_APP_NAME: ${{ vars.ANDROID_APP_NAME }}
+        run: |
+          set -euo pipefail
+
+          VERSION_CODE_OFFSET="${VERSION_CODE_OFFSET:-0}"
+          if [[ ! "$VERSION_CODE_OFFSET" =~ ^[0-9]+$ ]]; then
+            echo "::error::ANDROID_VERSION_CODE_OFFSET must be an integer"
+            exit 1
+          fi
+
+          if [[ -z "${RAW_VERSION_CODE:-}" || "${RAW_VERSION_CODE}" == "auto" ]]; then
+            VERSION_CODE=$((GITHUB_RUN_NUMBER + VERSION_CODE_OFFSET))
+          else
+            VERSION_CODE="$RAW_VERSION_CODE"
+          fi
+          if [[ ! "$VERSION_CODE" =~ ^[0-9]+$ ]]; then
+            echo "::error::version_code must be an integer or auto"
+            exit 1
+          fi
+
+          if [[ -z "${RAW_VERSION_NAME:-}" || "${RAW_VERSION_NAME}" == "auto" ]]; then
+            LATEST_TAG=$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)
+            if [[ "$LATEST_TAG" =~ ^v?([0-9]+)\.([0-9]+)\.([0-9]+)$ ]]; then
+              VERSION_NAME="${BASH_REMATCH[1]}.${BASH_REMATCH[2]}.$((BASH_REMATCH[3] + 1))"
+            else
+              VERSION_NAME_PREFIX="${VERSION_NAME_PREFIX:-1.0}"
+              VERSION_NAME="${VERSION_NAME_PREFIX}.${VERSION_CODE}"
+            fi
+          else
+            VERSION_NAME="$RAW_VERSION_NAME"
+          fi
+          if [[ ! "$VERSION_NAME" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version_name must be x.y.z or auto"
+            exit 1
+          fi
+
+          APP_NAME="${RAW_APP_NAME:-}"
+          if [[ -z "$APP_NAME" ]]; then
+            APP_NAME="${DEFAULT_APP_NAME:-LinkWeb}"
+          fi
+
+          {
+            echo "version_code=$VERSION_CODE"
+            echo "version_name=$VERSION_NAME"
+            echo "app_name=$APP_NAME"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "✅ Version code: $VERSION_CODE"
+          echo "✅ Version name: $VERSION_NAME"
+          echo "✅ App name: $APP_NAME"
+
       - name: Setup Java
         uses: actions/setup-java@v4
         with:
@@ -49,12 +109,10 @@ jobs:
 
       - name: Create Flutter skeleton
         run: |
-          # 每次全新生成项目结构
           flutter create --platforms=android --org com.linkweb linkweb_build
 
       - name: Copy sources into skeleton
         run: |
-          # 将你的代码覆盖进去
           rsync -a app/ linkweb_build/
 
       - name: Force Android minSdk = 24
@@ -68,7 +126,6 @@ jobs:
             sed -i -E 's/minSdkVersion[[:space:]]+[^[:space:]]+/minSdkVersion 24/' "$GROOVY"
           elif [ -f "$KTS" ]; then
             echo "✅ Found build.gradle.kts (Kotlin)"
-            # Kotlin DSL 语法稍有不同
             sed -i -E 's/minSdk[[:space:]]*=[[:space:]]*[^[:space:]]+/minSdk = 24/' "$KTS"
           else
             echo "❌ No Gradle file found"
@@ -78,29 +135,28 @@ jobs:
       - name: Set Version Code and Version Name
         run: |
           cat >> linkweb_build/android/local.properties << EOF
-          flutter.versionCode=${{ github.event.inputs.version_code }}
-          flutter.versionName=${{ github.event.inputs.version_name }}
+          flutter.versionCode=${{ steps.meta.outputs.version_code }}
+          flutter.versionName=${{ steps.meta.outputs.version_name }}
           EOF
 
       - name: Set Application Name (支持中文)
         run: |
           python3 << 'PYTHON_SCRIPT'
           import re
-          
-          app_name = '''${{ github.event.inputs.app_name }}'''
+
+          app_name = '''${{ steps.meta.outputs.app_name }}'''
           manifest_path = 'linkweb_build/android/app/src/main/AndroidManifest.xml'
-          
+
           try:
               with open(manifest_path, 'r', encoding='utf-8') as f:
                   content = f.read()
-              
-              # 替换 label
+
               content = re.sub(
                   r'android:label="[^"]*"',
                   f'android:label="{app_name}"',
                   content
               )
-              
+
               with open(manifest_path, 'w', encoding='utf-8') as f:
                   f.write(content)
               print(f"✅ App name set to: {app_name}")
@@ -110,41 +166,43 @@ jobs:
           PYTHON_SCRIPT
 
       - name: Prepare Keystore
+        env:
+          ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
         run: |
           set -euo pipefail
-          
-          # 检查 Secrets 是否存在
-          if [ -z "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" ]; then
-            echo "❌ Error: ANDROID_KEYSTORE_BASE64 secret is missing."
-            exit 1
-          fi
-          
-          # 解码 Keystore
-          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 -d > keystore.jks
+
+          for name in ANDROID_KEYSTORE_BASE64 ANDROID_KEYSTORE_PASSWORD ANDROID_KEY_PASSWORD ANDROID_KEY_ALIAS; do
+            if [ -z "${!name:-}" ]; then
+              echo "❌ Error: $name is missing."
+              exit 1
+            fi
+          done
+
+          printf '%s' "$ANDROID_KEYSTORE_BASE64" | base64 -d > keystore.jks
           KEYSTORE_PATH="$(realpath keystore.jks)"
-          
-          # 创建 key.properties 供 Gradle 读取
+
           cat > linkweb_build/android/key.properties << EOF
-          storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
-          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
-          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          storePassword=$ANDROID_KEYSTORE_PASSWORD
+          keyPassword=$ANDROID_KEY_PASSWORD
+          keyAlias=$ANDROID_KEY_ALIAS
           storeFile=$KEYSTORE_PATH
           EOF
-          
+
           echo "✅ Keystore prepared."
 
       - name: Configure Gradle for signing (Fixed for Kotlin DSL)
         run: |
           set -euo pipefail
-          
+
           GROOVY="linkweb_build/android/app/build.gradle"
           KTS="linkweb_build/android/app/build.gradle.kts"
-          
-          # === 分支 1: 处理 Kotlin DSL (新版 Flutter 默认) ===
+
           if [ -f "$KTS" ]; then
             echo "✅ Detected Kotlin DSL (build.gradle.kts)"
-            
-            # 1. 在文件头部添加 Keystore 加载逻辑
+
             cat > /tmp/header.txt << 'EOF'
           import java.io.FileInputStream
           import java.util.Properties
@@ -159,16 +217,14 @@ jobs:
             cat "$KTS" >> /tmp/header.txt
             mv /tmp/header.txt "$KTS"
 
-            # 2. 使用 Python 注入 signingConfigs
             python3 << 'PYTHON_SCRIPT'
           import re
-          
+
           gradle_file = 'linkweb_build/android/app/build.gradle.kts'
-          
+
           with open(gradle_file, 'r') as f:
               content = f.read()
-          
-          # Kotlin 格式的签名配置
+
           signing_config_block = '''
               signingConfigs {
                   create("release") {
@@ -179,8 +235,7 @@ jobs:
                   }
               }
           '''
-          
-          # 插入 signingConfigs (在 buildTypes 之前)
+
           if "signingConfigs {" not in content:
               content = re.sub(
                   r'(\s+buildTypes\s*\{)',
@@ -188,24 +243,20 @@ jobs:
                   content
               )
 
-          # 应用签名配置到 release 构建类型
-          # 查找 buildTypes { release { ... } } 结构并注入
           content = re.sub(
               r'(buildTypes\s*\{[\s\S]*?release\s*\{)',
               r'\1\n            signingConfig = signingConfigs.getByName("release")',
               content
           )
-          
+
           with open(gradle_file, 'w') as f:
               f.write(content)
           print("✅ Injected signing config into build.gradle.kts")
           PYTHON_SCRIPT
 
-          # === 分支 2: 处理 Groovy DSL (旧版 Flutter) ===
           elif [ -f "$GROOVY" ]; then
             echo "✅ Detected Groovy DSL (build.gradle)"
-            
-            # 加载 Properties
+
             cat > /tmp/prepend.txt << 'GRADLE_HEADER'
           def keystoreProperties = new Properties()
           def keystorePropertiesFile = rootProject.file("key.properties")
@@ -213,17 +264,16 @@ jobs:
               keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
           }
           GRADLE_HEADER
-            
+
             cat /tmp/prepend.txt "$GROOVY" > /tmp/build.gradle.new
             mv /tmp/build.gradle.new "$GROOVY"
-            
-            # 注入配置
+
             python3 << 'PYTHON_SCRIPT'
           import re
           gradle_file = 'linkweb_build/android/app/build.gradle'
           with open(gradle_file, 'r') as f:
               content = f.read()
-          
+
           signing_config = '''
               signingConfigs {
                   release {
@@ -239,7 +289,7 @@ jobs:
           with open(gradle_file, 'w') as f:
               f.write(content)
           PYTHON_SCRIPT
-            
+
           else
             echo "❌ No Gradle file found!"
             exit 1
@@ -253,38 +303,82 @@ jobs:
         working-directory: linkweb_build
         run: |
           set -euo pipefail
-          flutter build apk --release --split-per-abi
-          
+          flutter build apk --release --split-per-abi \
+            --build-name "${{ steps.meta.outputs.version_name }}" \
+            --build-number "${{ steps.meta.outputs.version_code }}"
+
           echo "📦 Build output:"
           find build/app/outputs -name "*.apk" -exec ls -lh {} \;
 
-      - name: Verify APK signature
+      - name: Verify APK signature and version metadata
+        env:
+          EXPECTED_SIGNER_SHA256: ${{ vars.ANDROID_EXPECTED_CERT_SHA256 }}
+          EXPECTED_VERSION_CODE: ${{ steps.meta.outputs.version_code }}
+          EXPECTED_VERSION_NAME: ${{ steps.meta.outputs.version_name }}
         run: |
-          echo "🔍 Verifying APK signatures..."
-          # 只要验证一个就能确认签名是否生效
+          set -euo pipefail
+          echo "🔍 Verifying APK signature and version..."
+
           APK_FILE=$(find linkweb_build/build/app/outputs/flutter-apk/ -name "app-*-release.apk" | head -n 1)
-          if [ -f "$APK_FILE" ]; then
-             echo "Checking: $APK_FILE"
-             # 检查是否包含你的 Alias 名称 (grep 搜索)
-             jarsigner -verify -verbose -certs "$APK_FILE" | grep "X.509" -A 2 || true
+          if [ ! -f "$APK_FILE" ]; then
+            echo "::error::No release APK found"
+            exit 1
           fi
+          echo "Checking: $APK_FILE"
+
+          APKSIGNER=$(find "$ANDROID_HOME/build-tools" -name apksigner | sort -V | tail -n 1)
+          AAPT=$(find "$ANDROID_HOME/build-tools" -name aapt | sort -V | tail -n 1)
+          if [ -z "$APKSIGNER" ] || [ -z "$AAPT" ]; then
+            echo "::error::Android build-tools apksigner/aapt not found"
+            exit 1
+          fi
+
+          "$APKSIGNER" verify --print-certs "$APK_FILE" | tee /tmp/apk-signature.txt
+          ACTUAL_SIGNER_SHA256=$(grep 'Signer #1 certificate SHA-256 digest:' /tmp/apk-signature.txt | head -n1 | sed 's/.*: //')
+          normalize_hash() { tr '[:upper:]' '[:lower:]' | tr -d ':'; }
+          ACTUAL_NORMALIZED=$(printf '%s' "$ACTUAL_SIGNER_SHA256" | normalize_hash)
+          EXPECTED_NORMALIZED=$(printf '%s' "$EXPECTED_SIGNER_SHA256" | normalize_hash)
+
+          if [ -z "$EXPECTED_NORMALIZED" ]; then
+            echo "::error::ANDROID_EXPECTED_CERT_SHA256 variable is missing"
+            exit 1
+          fi
+          if [ "$ACTUAL_NORMALIZED" != "$EXPECTED_NORMALIZED" ]; then
+            echo "::error::APK signer SHA-256 mismatch"
+            echo "Actual signer SHA-256: $ACTUAL_SIGNER_SHA256"
+            exit 1
+          fi
+          echo "✅ APK signer SHA-256 matches expected fixed signing certificate: $ACTUAL_SIGNER_SHA256"
+
+          BADGING=$("$AAPT" dump badging "$APK_FILE")
+          echo "$BADGING" | grep '^package:'
+          ACTUAL_VERSION_CODE=$(echo "$BADGING" | sed -n "s/.*versionCode='\([^']*\)'.*/\1/p" | head -n1)
+          ACTUAL_VERSION_NAME=$(echo "$BADGING" | sed -n "s/.*versionName='\([^']*\)'.*/\1/p" | head -n1)
+          if [ "$ACTUAL_VERSION_CODE" != "$EXPECTED_VERSION_CODE" ]; then
+            echo "::error::APK versionCode mismatch: expected $EXPECTED_VERSION_CODE, got $ACTUAL_VERSION_CODE"
+            exit 1
+          fi
+          if [ "$ACTUAL_VERSION_NAME" != "$EXPECTED_VERSION_NAME" ]; then
+            echo "::error::APK versionName mismatch: expected $EXPECTED_VERSION_NAME, got $ACTUAL_VERSION_NAME"
+            exit 1
+          fi
+          echo "✅ APK version metadata matches: versionCode=$ACTUAL_VERSION_CODE, versionName=$ACTUAL_VERSION_NAME"
 
       - name: Rename and collect APKs
         run: |
           set -euo pipefail
           mkdir -p dist
-          
-          VERSION="${{ github.event.inputs.version_name }}"
-          APP_NAME="${{ github.event.inputs.app_name }}"
-          # 清理文件名
+
+          VERSION="${{ steps.meta.outputs.version_name }}"
+          APP_NAME="${{ steps.meta.outputs.app_name }}"
           SAFE_APP_NAME=$(echo "$APP_NAME" | sed 's/[^[:alnum:]_-]//g')
           [ -z "$SAFE_APP_NAME" ] && SAFE_APP_NAME="LinkWeb"
-          
+
           echo "📦 Collecting APKs..."
-          
+
           for apk in linkweb_build/build/app/outputs/flutter-apk/app-*-release.apk; do
             [ -f "$apk" ] || continue
-            
+
             basename=$(basename "$apk")
             if [[ $basename == *"arm64-v8a"* ]]; then
               cp "$apk" "dist/${SAFE_APP_NAME}-${VERSION}-arm64-v8a.apk"
@@ -296,13 +390,13 @@ jobs:
               cp "$apk" "dist/${SAFE_APP_NAME}-${VERSION}.apk"
             fi
           done
-          
+
           ls -lh dist/
 
       - name: Upload APKs as artifact
         uses: actions/upload-artifact@v4
         with:
-          name: APKs-${{ github.run_number }}-v${{ github.event.inputs.version_name }}
+          name: APKs-${{ github.run_number }}-v${{ steps.meta.outputs.version_name }}
           path: dist/*.apk
 
       - name: Create GitHub Release
@@ -311,16 +405,15 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          TAG="v${{ github.event.inputs.version_name }}"
-          
-          # 检查 Tag 是否存在
+          TAG="v${{ steps.meta.outputs.version_name }}"
+
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Updating existing release $TAG"
             gh release upload "$TAG" dist/*.apk --clobber
           else
             echo "Creating new release $TAG"
             gh release create "$TAG" \
-              --title "$TAG - ${{ github.event.inputs.app_name }}" \
+              --title "$TAG - ${{ steps.meta.outputs.app_name }}" \
               --notes "${{ github.event.inputs.release_notes }}" \
               dist/*.apk
           fi
